@@ -119,40 +119,35 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         _speakerRecognizer.SetWords(true);
 
         // ── マイク ──
-        Console.WriteLine($"[Vosk] マイク フォーマット: " +
-                          $"{_micCapture.WaveFormat.SampleRate} Hz, " +
-                          $"{_micCapture.WaveFormat.BitsPerSample} bit, " +
-                          $"{_micCapture.WaveFormat.Channels} ch");
-
         _micCapture.DataAvailable += OnMicDataAvailable;
         _micCapture.RecordingStopped += (_, e) =>
         {
-            Console.WriteLine("[Vosk] マイクキャプチャが停止しました");
             if (e.Exception != null)
-                Console.WriteLine($"[Vosk] マイクエラー: {e.Exception.Message}");
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"  マイクエラー: {e.Exception.Message}");
+                Console.ResetColor();
+            }
         };
 
         // ── スピーカー ──
         _loopbackFormat = _speakerCapture.WaveFormat;
-        Console.WriteLine($"[Vosk] スピーカー フォーマット: " +
-                          $"{_loopbackFormat.SampleRate} Hz, " +
-                          $"{_loopbackFormat.BitsPerSample} bit, " +
-                          $"{_loopbackFormat.Channels} ch");
 
         _speakerCapture.DataAvailable += OnSpeakerDataAvailable;
         _speakerCapture.RecordingStopped += (_, e) =>
         {
-            Console.WriteLine("[Vosk] スピーカーキャプチャが停止しました");
             if (e.Exception != null)
-                Console.WriteLine($"[Vosk] スピーカーエラー: {e.Exception.Message}");
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"  スピーカーエラー: {e.Exception.Message}");
+                Console.ResetColor();
+            }
         };
 
         // ── キャプチャ開始 ──
         _speakerCapture.StartRecording();
-        Console.WriteLine("[Vosk] スピーカーループバックを開始 (安定待ち...)");
         Thread.Sleep(1500);
         _micCapture.StartRecording();
-        Console.WriteLine("[Vosk] マイク + スピーカーキャプチャを開始しました");
     }
 
     // ────────────────────────────────────────────────
@@ -171,26 +166,18 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         }
 
         // 初回ログ
-        if (_micChunks <= 3)
+        if (_micChunks <= 1)
         {
             short maxSample = CalcPeak(e.Buffer, e.BytesRecorded);
-            Console.WriteLine($"[Vosk] マイク chunk#{_micChunks}: {e.BytesRecorded} bytes, ピーク={maxSample}");
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"  [Vosk] マイク ピーク={maxSample}");
+            Console.ResetColor();
         }
 
         // Vosk に音声データを供給
         if (_micRecognizer.AcceptWaveform(e.Buffer, e.BytesRecorded))
         {
             ProcessResult(_micRecognizer.Result(), "自分");
-        }
-        else
-        {
-            // 部分認識結果の表示 (デバッグ用、低頻度)
-            if (_micChunks % 50 == 0)
-            {
-                var partial = ParsePartial(_micRecognizer.PartialResult());
-                if (!string.IsNullOrWhiteSpace(partial))
-                    Console.Write($"\r[Vosk] マイク(部分): {partial}                    ");
-            }
         }
     }
 
@@ -216,10 +203,12 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         }
 
         // 初回ログ
-        if (_speakerChunks <= 3)
+        if (_speakerChunks <= 1)
         {
             short maxSample = CalcPeak(converted, converted.Length);
-            Console.WriteLine($"[Vosk] スピーカー chunk#{_speakerChunks}: {converted.Length} bytes, ピーク={maxSample}");
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"  [Vosk] スピーカー ピーク={maxSample}");
+            Console.ResetColor();
         }
 
         // 無音フィルタ: ピークが閾値以下ならVoskへの供給をスキップ
@@ -245,8 +234,6 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         // Vosk の日本語モデルは形態素ごとにスペースを入れるので除去する
         text = text.Replace(" ", "").Replace("\u3000", "");
         if (string.IsNullOrWhiteSpace(text)) return;
-
-        Console.WriteLine($"[Vosk] 認識 ({speaker}): \"{text}\"");
 
         var entry = new TranscriptEntry(
             Timestamp: DateTime.Now,
@@ -348,7 +335,6 @@ public sealed class VoskCallTranscriber : ICallTranscriber
     // ────────────────────────────────────────────────
     public void Stop()
     {
-        Console.WriteLine("[Vosk] 停止中...");
         _stopping = true;
 
         _micCapture.StopRecording();
@@ -378,9 +364,7 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         lock (_micRecLock) micBytes = _micRecording.Length;
         lock (_speakerRecLock) spkBytes = _speakerRecording.Length;
 
-        Console.WriteLine($"[Vosk] マイクチャンク: {_micChunks}, スピーカーチャンク: {_speakerChunks}");
-        Console.WriteLine($"[Vosk] 録音サイズ: マイク={micBytes / 1024}KB, スピーカー={spkBytes / 1024}KB");
-        Console.WriteLine("[Vosk] 音声認識を停止しました");
+
     }
 
     // ────────────────────────────────────────────────

@@ -3,23 +3,69 @@ using TalkTranscript.Audio;
 using TalkTranscript.Models;
 using TalkTranscript.Transcribers;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Speech.Recognition;
 using Vosk;
 
 // ── 初期化 ──
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 Console.InputEncoding = System.Text.Encoding.UTF8;
+ConsoleHelper.SetFont("BIZ UDゴシック", 18);
 
 bool testMode = args.Contains("--test");
 bool diagMode = args.Contains("--diag");
 bool whisperOnly = args.Contains("--whisper-only");  // Whisper後処理のみテスト
 int testSeconds = 12;
 
-// エンジン選択: --engine sapi / --engine vosk (デフォルト: vosk)
-string engineName = "vosk";
+// エンジン選択: --engine 引数 > 設定ファイル > 環境推奨
+var hwProfile = HardwareInfo.Detect();
+string engineName;
+bool useGpu;
 int engineIdx = Array.IndexOf(args, "--engine");
 if (engineIdx >= 0 && engineIdx + 1 < args.Length)
+{
     engineName = args[engineIdx + 1].ToLowerInvariant();
+    useGpu = !args.Contains("--cpu");
+}
+else
+{
+    var savedSettings = AppSettings.Load();
+    if (savedSettings.EngineName != null)
+    {
+        // 保存済み設定を使用
+        engineName = savedSettings.EngineName.ToLowerInvariant();
+        useGpu = savedSettings.UseGpu;
+    }
+    else
+    {
+        // 初回起動: 環境に最適なエンジンを自動選択
+        engineName = hwProfile.RecommendedEngine;
+        useGpu = hwProfile.RecommendedUseGpu;
+    }
+}
+
+// Whisper モデルサイズの解析
+string? whisperModelSize = null;
+if (engineName.StartsWith("whisper-"))
+    whisperModelSize = engineName.Substring("whisper-".Length); // "tiny", "base" etc.
+
+// ── CUDA 利用可否チェック & ランタイムセットアップ ──
+bool cudaAvailable = IsCudaAvailable();
+if (useGpu && cudaAvailable)
+{
+    SetupCudaRuntime();
+}
+else if (useGpu && !cudaAvailable)
+{
+    useGpu = false;
+    Console.ForegroundColor = ConsoleColor.Yellow;
+    Console.WriteLine("  ⚠ CUDA Toolkit (cublas64_13.dll) が見つかりません。CPU モードで動作します。");
+    Console.WriteLine("    GPU を有効化するには CUDA Toolkit 13 をインストールしてください:");
+    Console.ForegroundColor = ConsoleColor.DarkCyan;
+    Console.WriteLine("    https://developer.nvidia.com/cuda-downloads");
+    Console.ResetColor();
+    Console.WriteLine();
+}
 
 // ── 診断モード ──
 if (diagMode)
@@ -31,9 +77,14 @@ if (diagMode)
 // ── Whisper モデルのみダウンロード ──
 if (whisperOnly)
 {
-    Console.WriteLine("Whisper モデルをダウンロードします...");
-    await ModelManager.EnsureWhisperModelAsync();
-    Console.WriteLine("完了しました。次回の通話から Whisper 後処理が有効になります。");
+    // --whisper-only [size] でサイズ指定可能 (デフォルト: base)
+    string dlSize = "base";
+    int woIdx = Array.IndexOf(args, "--whisper-only");
+    if (woIdx >= 0 && woIdx + 1 < args.Length && !args[woIdx + 1].StartsWith("--"))
+        dlSize = args[woIdx + 1].ToLowerInvariant();
+    Console.WriteLine($"Whisper {dlSize} モデルをダウンロードします...");
+    await ModelManager.EnsureWhisperModelAsync(dlSize);
+    Console.WriteLine("完了しました。");
     return;
 }
 
@@ -42,18 +93,13 @@ if (!testMode)
     Console.TreatControlCAsInput = true;
 }
 
-Console.WriteLine("╔══════════════════════════════════════╗");
-Console.WriteLine("║    通話文字起こしツール               ║");
-Console.WriteLine("╚══════════════════════════════════════╝");
-Console.WriteLine();
-if (testMode) Console.WriteLine($"[テストモード] 自動で開始し、{testSeconds}秒後に停止します。");
-Console.WriteLine($"認識エンジン: {engineName.ToUpperInvariant()}");
-Console.WriteLine();
+if (!testMode)
+{
+    Console.TreatControlCAsInput = true;
+}
 
-// ── デバイス選択 ──
+// ── デバイス読み込み ──
 var settings = AppSettings.Load();
-
-// 前回の設定がある場合はデバイス選択をスキップして即開始
 bool hasSavedDevices = !string.IsNullOrEmpty(settings.MicrophoneDeviceId)
                     && !string.IsNullOrEmpty(settings.SpeakerDeviceId);
 
@@ -65,11 +111,6 @@ if (hasSavedDevices)
     try
     {
         (micDevice, speakerDevice) = DeviceSelector.LoadSavedDevices(settings);
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.WriteLine($"マイク: {micDevice.FriendlyName}");
-        Console.WriteLine($"スピーカー: {speakerDevice.FriendlyName}");
-        Console.ResetColor();
-        Console.WriteLine("(デバイスを変更するには Ctrl+D を押してください)");
     }
     catch
     {
@@ -81,84 +122,293 @@ else
 {
     (micDevice, speakerDevice) = DeviceSelector.SelectDevices(settings);
 }
-Console.WriteLine();
 
-// ── リアルタイム表示用コールバック ──
-// ファイル出力は逐次追記で行う
+// ── ファイル出力準備 (セッション全体で1ファイル) ──
 var outputDir = Path.Combine(AppContext.BaseDirectory, "Transcripts");
 Directory.CreateDirectory(outputDir);
 var fileName = $"transcript_{DateTime.Now:yyyyMMdd_HHmmss}.txt";
 var filePath = Path.Combine(outputDir, fileName);
 using var writer = new TranscriptWriter(filePath);
 
-void OnTranscribed(TranscriptEntry entry)
-{
-    // コンソール表示
-    var color = entry.Speaker == "自分" ? ConsoleColor.Cyan : ConsoleColor.Yellow;
-    var prev = Console.ForegroundColor;
-    Console.ForegroundColor = color;
-    Console.WriteLine($"  [{entry.Timestamp:HH:mm:ss}] {entry.Speaker}: {entry.Text}");
-    Console.ForegroundColor = prev;
+var overallStart = DateTime.Now;
+int totalMicCount = 0;
+int totalSpkCount = 0;
 
-    // ファイルへ即座に追記
-    writer.Append(entry);
-}
+// ── セッションループ ──
+// Ctrl+D/E で停止→設定変更→再開、Ctrl+Q で終了
+bool quit = false;
+ICallTranscriber? lastTranscriber = null;
 
-// ── トランスクライバ初期化・開始 ──
-ICallTranscriber callTranscriber;
-DateTime callStartTime = DateTime.Now;
+while (!quit)
+{
+    // ── バナー表示 ──
+    PrintBanner(engineName, useGpu, micDevice, speakerDevice, filePath, testMode, testSeconds);
 
-if (engineName == "vosk")
-{
-    // Vosk モデルのダウンロード/準備
-    string voskModelPath = await ModelManager.EnsureVoskModelAsync();
-    var voskModel = new Model(voskModelPath);
-    callTranscriber = new VoskCallTranscriber(voskModel, micDevice, speakerDevice);
-}
-else
-{
-    // 旧SAPI エンジン
-    callTranscriber = new SapiCallTranscriber(micDevice, speakerDevice, "ja-JP");
-}
+    // ── Whisper モデルサイズ解析 ──
+    whisperModelSize = engineName.StartsWith("whisper-")
+        ? engineName.Substring("whisper-".Length)
+        : null;
 
-try
-{
+    // ── トランスクライバ作成 ──
+    ICallTranscriber callTranscriber;
+    if (whisperModelSize != null)
+    {
+        string wModelPath = await ModelManager.EnsureWhisperModelAsync(whisperModelSize);
+        callTranscriber = new WhisperCallTranscriber(wModelPath, whisperModelSize, micDevice, speakerDevice, useGpu);
+    }
+    else if (engineName == "vosk")
+    {
+        string voskModelPath = await ModelManager.EnsureVoskModelAsync();
+        var voskModel = new Model(voskModelPath);
+        callTranscriber = new VoskCallTranscriber(voskModel, micDevice, speakerDevice);
+    }
+    else
+    {
+        callTranscriber = new SapiCallTranscriber(micDevice, speakerDevice, "ja-JP");
+    }
+
+    lastTranscriber = callTranscriber;
+    int sessionMic = 0, sessionSpk = 0;
+
+    void OnTranscribed(TranscriptEntry entry)
+    {
+        var icon = entry.Speaker == "自分" ? "▶" : "◀";
+        var color = entry.Speaker == "自分" ? ConsoleColor.Cyan : ConsoleColor.Yellow;
+        Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.Write($"  {entry.Timestamp:HH:mm:ss} ");
+        Console.ForegroundColor = color;
+        Console.Write($"{icon} {entry.Speaker}: ");
+        Console.ResetColor();
+        Console.WriteLine(entry.Text);
+
+        writer.Append(entry);
+
+        if (entry.Speaker == "自分") { sessionMic++; totalMicCount++; }
+        else { sessionSpk++; totalSpkCount++; }
+    }
+
     callTranscriber.OnTranscribed += OnTranscribed;
-    callTranscriber.Start();
-}
-catch (Exception ex)
-{
-    Console.ForegroundColor = ConsoleColor.Red;
-    Console.WriteLine($"音声認識の開始に失敗しました: {ex.Message}");
-    Console.WriteLine(ex.StackTrace);
+
+    try
+    {
+        callTranscriber.Start();
+    }
+    catch (Exception ex)
+    {
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine($"  音声認識の開始に失敗しました: {ex.Message}");
+        Console.ResetColor();
+        callTranscriber.Dispose();
+        return;
+    }
+
+    PrintRecordingBar(testMode, testSeconds);
+
+    // ── 経過時間表示タスク ──
+    using var cts = new CancellationTokenSource();
+    var elapsedTask = ShowElapsedAsync(overallStart, cts.Token);
+
+    // ── キー入力待ち ──
+    string action;
+    if (testMode)
+    {
+        Thread.Sleep(testSeconds * 1000);
+        action = "quit";
+    }
+    else
+    {
+        action = WaitForKeys();
+    }
+
+    cts.Cancel();
+    try { await elapsedTask; } catch { }
+
+    // ── 停止 ──
+    Console.WriteLine();
+    Console.ForegroundColor = ConsoleColor.DarkGray;
+    Console.WriteLine("  停止中...");
     Console.ResetColor();
-    return;
+    callTranscriber.Stop();
+
+    // ── セッション統計 ──
+    var sessionElapsed = DateTime.Now - overallStart;
+    Console.ForegroundColor = ConsoleColor.DarkGray;
+    Console.WriteLine($"  ─── セッション: 自分 {sessionMic}件 / 相手 {sessionSpk}件 ───");
+    Console.ResetColor();
+    Console.WriteLine();
+
+    // ── アクション処理 ──
+    switch (action)
+    {
+        case "quit":
+            // Whisper 後処理
+            RunPostProcessing(callTranscriber, whisperModelSize, writer, filePath, overallStart);
+            quit = true;
+            break;
+
+        case "device":
+            callTranscriber.Dispose();
+            PrintSectionHeader("デバイス変更");
+            (micDevice, speakerDevice) = DeviceSelector.SelectDevices(settings);
+            Console.WriteLine();
+            break;
+
+        case "engine":
+            callTranscriber.Dispose();
+            PrintSectionHeader("エンジン変更");
+            var newEngine = SelectEngineMenu(engineName);
+            if (newEngine != null)
+            {
+                engineName = newEngine;
+                var es = AppSettings.Load();
+                es.EngineName = engineName;
+                es.Save();
+            }
+            Console.WriteLine();
+            break;
+
+        case "gpu":
+            callTranscriber.Dispose();
+            if (!useGpu && !cudaAvailable)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("  ⚠ CUDA Toolkit (cublas64_13.dll) が未インストールのため GPU に切り替えできません");
+                Console.ResetColor();
+            }
+            else
+            {
+                useGpu = !useGpu;
+                var gs = AppSettings.Load();
+                gs.UseGpu = useGpu;
+                gs.Save();
+                Console.ForegroundColor = useGpu ? ConsoleColor.Green : ConsoleColor.Yellow;
+                Console.WriteLine($"  → {(useGpu ? "GPU (CUDA)" : "CPU")} モードに切り替えました");
+                Console.ResetColor();
+            }
+            Console.WriteLine();
+            break;
+    }
+
+    if (action == "quit")
+        callTranscriber.Dispose();
 }
 
+// ── 最終出力 ──
+writer.Close();
 Console.WriteLine();
-Console.WriteLine("────────────────────────────────────────");
-Console.WriteLine(" 文字起こしを開始しました。");
-if (testMode)
-{
-    Console.WriteLine($" {testSeconds}秒後に自動停止します。");
-}
-else
-{
-    Console.WriteLine(" Ctrl+Q : 録音停止して保存");
-    Console.WriteLine(" Ctrl+D : デバイス変更 (次回から反映)");
-}
-Console.WriteLine("────────────────────────────────────────");
+Console.ForegroundColor = ConsoleColor.Green;
+Console.Write("  ✓ ");
+Console.ResetColor();
+Console.Write("保存先: ");
+Console.ForegroundColor = ConsoleColor.White;
+Console.WriteLine(filePath);
+Console.ResetColor();
+
+var total = DateTime.Now - overallStart;
+Console.ForegroundColor = ConsoleColor.DarkGray;
+Console.WriteLine($"  合計: 自分 {totalMicCount}件 / 相手 {totalSpkCount}件 / 経過 {total:hh\\:mm\\:ss}");
+Console.ResetColor();
 Console.WriteLine();
 
-// ── 終了待ち ──
-if (testMode)
+// ══════════════════════════════════════════════════
+//  ヘルパー関数
+// ══════════════════════════════════════════════════
+
+void PrintBanner(string engine, bool useGpu, NAudio.CoreAudioApi.MMDevice mic, NAudio.CoreAudioApi.MMDevice spk,
+                 string file, bool test, int sec)
 {
-    Thread.Sleep(testSeconds * 1000);
+    Console.ForegroundColor = ConsoleColor.White;
+    Console.WriteLine();
+    Console.WriteLine("  ╔══════════════════════════════════════╗");
+    Console.WriteLine("  ║      通話文字起こしツール             ║");
+    Console.WriteLine("  ╚══════════════════════════════════════╝");
+    Console.ResetColor();
+    Console.WriteLine();
+
+    if (test)
+    {
+        Console.ForegroundColor = ConsoleColor.Magenta;
+        Console.WriteLine($"  [テストモード] {sec}秒後に自動停止");
+        Console.ResetColor();
+        Console.WriteLine();
+    }
+
+    Console.ForegroundColor = ConsoleColor.DarkGray;
+    Console.Write("  エンジン    : ");
+    Console.ForegroundColor = ConsoleColor.White;
+    Console.Write(engine.ToUpperInvariant());
+    if (engine.StartsWith("whisper"))
+    {
+        Console.ForegroundColor = useGpu ? ConsoleColor.Green : ConsoleColor.DarkGray;
+        Console.Write(useGpu ? "  [GPU]" : "  [CPU]");
+    }
+    Console.ResetColor();
+    Console.WriteLine();
+
+    Console.ForegroundColor = ConsoleColor.DarkGray;
+    Console.Write("  マイク      : ");
+    Console.ForegroundColor = ConsoleColor.Cyan;
+    Console.WriteLine(mic.FriendlyName);
+
+    Console.ForegroundColor = ConsoleColor.DarkGray;
+    Console.Write("  スピーカー  : ");
+    Console.ForegroundColor = ConsoleColor.Yellow;
+    Console.WriteLine(spk.FriendlyName);
+
+    Console.ForegroundColor = ConsoleColor.DarkGray;
+    Console.Write("  出力先      : ");
+    Console.ForegroundColor = ConsoleColor.White;
+    Console.WriteLine(Path.GetFileName(file));
+    Console.ResetColor();
+    Console.WriteLine();
 }
-else
+
+void PrintRecordingBar(bool test, int sec)
 {
-    bool running = true;
-    while (running)
+    Console.ForegroundColor = ConsoleColor.Green;
+    Console.Write("  ● 録音中");
+    Console.ResetColor();
+
+    if (!test)
+    {
+        Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.Write("  │  ");
+        Console.ForegroundColor = ConsoleColor.White;
+        Console.Write("Ctrl+Q");
+        Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.Write(" 停止  ");
+        Console.ForegroundColor = ConsoleColor.White;
+        Console.Write("Ctrl+D");
+        Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.Write(" デバイス  ");
+        Console.ForegroundColor = ConsoleColor.White;
+        Console.Write("Ctrl+E");
+        Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.Write(" エンジン  ");
+        Console.ForegroundColor = ConsoleColor.White;
+        Console.Write("Ctrl+G");
+        Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.Write(" GPU切替");
+    }
+    Console.ResetColor();
+    Console.WriteLine();
+    Console.ForegroundColor = ConsoleColor.DarkGray;
+    Console.WriteLine("  ─────────────────────────────────────────────");
+    Console.ResetColor();
+    Console.WriteLine();
+}
+
+void PrintSectionHeader(string title)
+{
+    Console.ForegroundColor = ConsoleColor.DarkGray;
+    Console.WriteLine($"  ═══ {title} ═══");
+    Console.ResetColor();
+    Console.WriteLine();
+}
+
+string WaitForKeys()
+{
+    while (true)
     {
         if (!Console.KeyAvailable)
         {
@@ -168,100 +418,251 @@ else
 
         var key = Console.ReadKey(intercept: true);
 
-        // Ctrl+Q で録音停止
         if (key.Key == ConsoleKey.Q && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-        {
-            running = false;
-        }
-        // Ctrl+D でデバイス変更 (設定のみ変更、次回起動から反映)
-        else if (key.Key == ConsoleKey.D && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-        {
-            Console.WriteLine();
-            Console.WriteLine("デバイス設定を変更します (次回起動から反映):");
-            var newSettings = AppSettings.Load();
-            DeviceSelector.SelectDevices(newSettings);
-            Console.WriteLine();
-        }
+            return "quit";
+        if (key.Key == ConsoleKey.D && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            return "device";
+        if (key.Key == ConsoleKey.E && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            return "engine";
+        if (key.Key == ConsoleKey.G && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            return "gpu";
     }
 }
 
-Console.WriteLine();
-Console.WriteLine("停止中...");
-
-// ── 停止 ──
-callTranscriber.Stop();
-
-// ── Whisper 後処理判定 ──
-var micPcm = callTranscriber.GetMicRecording();
-var spkPcm = callTranscriber.GetSpeakerRecording();
-string? whisperModelPath = ModelManager.GetWhisperModelPath();
-bool hasRecording = micPcm.Length > 0 || spkPcm.Length > 0;
-
-Console.WriteLine($"マイク認識数: {callTranscriber.MicEntries.Count}");
-Console.WriteLine($"スピーカー認識数: {callTranscriber.SpeakerEntries.Count}");
-
-// ── Whisper 後処理 (モデルがある場合) ──
-// Whisper で再認識した場合はファイルを上書きする
-if (whisperModelPath != null && hasRecording)
+async Task ShowElapsedAsync(DateTime start, CancellationToken ct)
 {
-    Console.WriteLine();
-    Console.WriteLine("Whisper による高精度後処理を実行中...");
     try
     {
-        var whisperEntries = await WhisperPostProcessor.ProcessAsync(
-            whisperModelPath, micPcm, spkPcm, callStartTime);
-        if (whisperEntries.Count > 0)
+        while (!ct.IsCancellationRequested)
         {
-            // Whisper 結果で既存ファイルを上書き
-            writer.Close();
-            writer.Dispose();
-
-            // 新しい Writer で Whisper 結果を書き直す
-            using var whisperWriter = new TranscriptWriter(filePath);
-            foreach (var entry in whisperEntries)
-                whisperWriter.Append(entry);
-            whisperWriter.Close();
-
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("Whisper による高精度テキストでファイルを更新しました。");
+            await Task.Delay(30_000, ct);
+            var elapsed = DateTime.Now - start;
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"  ─── 経過 {elapsed:hh\\:mm\\:ss} ───");
             Console.ResetColor();
         }
-        else
-        {
-            writer.Close();
-        }
     }
-    catch (Exception ex)
-    {
-        Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.WriteLine($"Whisper 後処理エラー (Vosk の結果を使用します): {ex.Message}");
-        Console.ResetColor();
-        writer.Close();
-    }
+    catch (OperationCanceledException) { }
 }
-else
+
+string? SelectEngineMenu(string currentEngine)
 {
-    if (whisperModelPath == null && hasRecording)
+    var engines = new[]
+    {
+        ("vosk",           "Vosk",           "リアルタイム・オフライン"),
+        ("whisper-tiny",   "Whisper tiny",   "~39MB  準リアルタイム・高速"),
+        ("whisper-base",   "Whisper base",   "~142MB 準リアルタイム・標準"),
+        ("whisper-small",  "Whisper small",  "~466MB 準リアルタイム・高精度"),
+        ("whisper-medium", "Whisper medium", "~1.5GB 高精度"),
+        ("whisper-large",  "Whisper large",  "~3.1GB 最高精度"),
+        ("sapi",           "SAPI",           "Windows 標準")
+    };
+
+    // 環境情報表示
+    Console.ForegroundColor = ConsoleColor.DarkGray;
+    Console.Write("  環境: ");
+    Console.ForegroundColor = ConsoleColor.White;
+    if (hwProfile.HasNvidiaGpu)
+        Console.Write($"{hwProfile.GpuName} ({hwProfile.GpuVramMB / 1024}GB)");
+    else
+        Console.Write($"CPU {hwProfile.CpuCores}コア / RAM {hwProfile.SystemRamMB / 1024}GB");
+    Console.ResetColor();
+    Console.WriteLine();
+    Console.WriteLine();
+
+    Console.WriteLine("  エンジンを選択:");
+    Console.WriteLine();
+
+    for (int i = 0; i < engines.Length; i++)
+    {
+        var (id, label, desc) = engines[i];
+        bool isCurrent = id == currentEngine;
+        bool isRecommended = id == hwProfile.RecommendedEngine;
+        string rating = HardwareInfo.GetRecommendation(id, hwProfile);
+
+        // 番号
+        Console.ForegroundColor = isCurrent ? ConsoleColor.Green : ConsoleColor.Gray;
+        Console.Write($"  {i + 1}. ");
+
+        // 推奨マーク
+        if (rating == "★")
+            Console.ForegroundColor = ConsoleColor.Green;
+        else if (rating == "△")
+            Console.ForegroundColor = ConsoleColor.Yellow;
+        else if (rating == "✕")
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.Write($"{rating,-2}");
+
+        // ラベル
+        Console.ForegroundColor = isCurrent ? ConsoleColor.Green : ConsoleColor.White;
+        Console.Write($"{label,-16}");
+
+        // 説明
+        Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.Write(desc);
+
+        // 現在 / 推奨タグ
+        if (isCurrent)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.Write(" ← 現在");
+        }
+        else if (isRecommended)
+        {
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.Write(" ← 推奨");
+        }
+
+        Console.ResetColor();
+        Console.WriteLine();
+    }
+
+    Console.WriteLine();
+    Console.Write($"  番号 [1-{engines.Length}] (Enter でキャンセル): ");
+
+    string? input = Console.ReadLine();
+    if (int.TryParse(input, out int choice) && choice >= 1 && choice <= engines.Length)
+    {
+        var (selId, selLabel, _) = engines[choice - 1];
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"  → {selLabel}");
+        Console.ResetColor();
+        return selId;
+    }
+    else
     {
         Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.WriteLine("(Whisper モデルが未ダウンロードのため後処理をスキップ)");
-        Console.WriteLine("(高精度な文字起こしには: dotnet run -- --whisper-only を一度実行してモデルをダウンロード)");
+        Console.WriteLine("  キャンセルしました");
         Console.ResetColor();
+        return null;
     }
-    writer.Close();
 }
 
-callTranscriber.Dispose();
+void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
+                       TranscriptWriter w, string fp, DateTime callStart)
+{
+    var micPcm = transcriber.GetMicRecording();
+    var spkPcm = transcriber.GetSpeakerRecording();
 
-Console.ForegroundColor = ConsoleColor.Green;
-Console.WriteLine($"文字起こし結果を保存しました:");
-Console.WriteLine($"  {filePath}");
-Console.ResetColor();
+    string? whisperPostModelPath = whisperSize != null
+        ? null
+        : (ModelManager.GetWhisperModelPath("base") ?? ModelManager.GetWhisperModelPath("tiny"));
+    bool hasRecording = micPcm.Length > 0 || spkPcm.Length > 0;
 
-Console.WriteLine();
-Console.WriteLine("完了しました。");
+    if (whisperPostModelPath != null && hasRecording)
+    {
+        // 録音が短すぎる場合はスキップ (16kHz/16bit/mono = 32KB/秒)
+        long minBytes = 32_000 * 2; // 最低2秒
+        if (micPcm.Length < minBytes && spkPcm.Length < minBytes)
+        {
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine("  (録音が短すぎるため後処理スキップ)");
+            Console.ResetColor();
+            return;
+        }
 
-// ── 診断モード関数 ──
+        Console.WriteLine("  Whisper 後処理を実行中...");
+        try
+        {
+            var whisperEntries = WhisperPostProcessor.ProcessAsync(
+                whisperPostModelPath, micPcm, spkPcm, callStart, useGpu).GetAwaiter().GetResult();
+            if (whisperEntries.Count > 0)
+            {
+                w.Close();
+                w.Dispose();
+                using var ww = new TranscriptWriter(fp);
+                foreach (var entry in whisperEntries) ww.Append(entry);
+                ww.Close();
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("  Whisper 後処理で更新しました。");
+                Console.ResetColor();
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  Whisper 後処理エラー: {ex.Message}");
+            Console.ResetColor();
+        }
+    }
+    else if (whisperPostModelPath == null && hasRecording && whisperSize == null)
+    {
+        Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.WriteLine("  (Whisper モデルなし → 後処理スキップ。dotnet run -- --whisper-only でダウンロード可能)");
+        Console.ResetColor();
+    }
+}
+
+/// <summary>
+/// CUDA DLL (runtimes/cuda/win-x64/) と CUDA Toolkit (cublas64_13.dll) が
+/// 利用可能かチェック。コピー不要 — ランタイムで PATH + プリロードで解決。
+/// </summary>
+bool IsCudaAvailable()
+{
+    var exeDir = AppContext.BaseDirectory;
+    var cudaDir = Path.Combine(exeDir, "runtimes", "cuda", "win-x64");
+    if (!File.Exists(Path.Combine(cudaDir, "ggml-cuda-whisper.dll")))
+        return false;
+    return FindCudaToolkitBinDir() != null;
+}
+
+/// <summary>CUDA Toolkit の bin ディレクトリ (cublas64_13.dll が存在する場所) を検索</summary>
+string? FindCudaToolkitBinDir()
+{
+    var candidates = new List<string>();
+    var cudaPath = Environment.GetEnvironmentVariable("CUDA_PATH");
+    if (!string.IsNullOrEmpty(cudaPath))
+    {
+        candidates.Add(Path.Combine(cudaPath, "bin", "x64"));
+        candidates.Add(Path.Combine(cudaPath, "bin"));
+    }
+    // 既知のインストールパスを幅広く検索
+    foreach (var ver in new[] { "v13.1", "v13.0", "v12.6", "v12.5", "v12.4" })
+    {
+        candidates.Add($@"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\{ver}\bin\x64");
+        candidates.Add($@"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\{ver}\bin");
+    }
+    foreach (var dir in candidates)
+    {
+        if (File.Exists(Path.Combine(dir, "cublas64_13.dll")))
+            return dir;
+    }
+    return null;
+}
+
+/// <summary>
+/// CUDA DLL をプリロードして CPU 版より先にロードさせる。
+/// PATH に CUDA Toolkit ディレクトリを追加し、依存解決も可能にする。
+/// </summary>
+void SetupCudaRuntime()
+{
+    var exeDir = AppContext.BaseDirectory;
+    var cudaDir = Path.Combine(exeDir, "runtimes", "cuda", "win-x64");
+    var toolkitDir = FindCudaToolkitBinDir();
+
+    // PATH に CUDA ディレクトリを追加 (cublas64_13.dll, cublasLt64_13.dll 等の依存解決用)
+    var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+    var newPaths = new List<string>();
+    if (Directory.Exists(cudaDir)) newPaths.Add(cudaDir);
+    if (toolkitDir != null) newPaths.Add(toolkitDir);
+    if (newPaths.Count > 0)
+        Environment.SetEnvironmentVariable("PATH", string.Join(";", newPaths) + ";" + path);
+
+    // CUDA 版 DLL をプリロード (依存順: base → cuda → whisper)
+    // Windows はモジュール名が既にロード済みなら同名の別 DLL をロードしない
+    foreach (var dll in new[] { "ggml-base-whisper.dll", "ggml-cpu-whisper.dll",
+                                "ggml-cuda-whisper.dll", "ggml-whisper.dll", "whisper.dll" })
+    {
+        var fullPath = Path.Combine(cudaDir, dll);
+        if (File.Exists(fullPath))
+        {
+            if (NativeLibrary.TryLoad(fullPath, out _))
+                Console.WriteLine($"  [CUDA] {dll} をプリロード");
+        }
+    }
+}
+
 void RunDiagnostics()
 {
     Console.WriteLine("=== 音声認識 診断モード ===");

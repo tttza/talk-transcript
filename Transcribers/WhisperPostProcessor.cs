@@ -25,13 +25,14 @@ public static class WhisperPostProcessor
         string whisperModelPath,
         byte[] micPcm,
         byte[] speakerPcm,
-        DateTime callStartTime)
+        DateTime callStartTime,
+        bool useGpu = true)
     {
         var entries = new List<TranscriptEntry>();
 
         Console.WriteLine("[Whisper] 後処理を開始します...");
 
-        using var factory = WhisperFactory.FromPath(whisperModelPath);
+        using var factory = WhisperFactory.FromPath(whisperModelPath, new WhisperFactoryOptions { UseGpu = useGpu });
 
         // マイク音声の処理
         if (micPcm.Length > 0)

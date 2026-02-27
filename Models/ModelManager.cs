@@ -19,7 +19,9 @@ public static class ModelManager
         "https://alphacephei.com/vosk/models/vosk-model-small-ja-0.22.zip";
 
     // ── Whisper ──
-    private const string WhisperModelFileName = "ggml-base.bin";
+    // モデルサイズに応じたファイル名を生成する
+    private static string WhisperModelFileName(string size) =>
+        size == "large" ? "ggml-large-v3.bin" : $"ggml-{size}.bin";
 
     /// <summary>Vosk モデルのディレクトリパスを返す。未ダウンロードなら null。</summary>
     public static string? GetVoskModelPath()
@@ -28,10 +30,10 @@ public static class ModelManager
         return Directory.Exists(modelPath) ? modelPath : null;
     }
 
-    /// <summary>Whisper モデルのファイルパスを返す。未ダウンロードなら null。</summary>
-    public static string? GetWhisperModelPath()
+    /// <summary>Whisper モデルのファイルパスを返す (既定: base)。未ダウンロードなら null。</summary>
+    public static string? GetWhisperModelPath(string size = "base")
     {
-        string modelPath = Path.Combine(ModelsDir, WhisperModelFileName);
+        string modelPath = Path.Combine(ModelsDir, WhisperModelFileName(size));
         return File.Exists(modelPath) ? modelPath : null;
     }
 
@@ -101,42 +103,73 @@ public static class ModelManager
     }
 
     /// <summary>
-    /// Whisper GGML モデルをダウンロードする (~142MB for base)。
-    /// Whisper.net の GgmlType を使用してダウンロードする。
+    /// Whisper GGML モデルをダウンロードする。
+    /// tiny (~39MB), base (~142MB), small (~466MB), medium (~1.5GB), large (~3.1GB)
     /// </summary>
-    public static async Task<string> EnsureWhisperModelAsync()
+    public static async Task<string> EnsureWhisperModelAsync(string size = "base")
     {
-        string modelPath = Path.Combine(ModelsDir, WhisperModelFileName);
+        string fileName = WhisperModelFileName(size);
+        string modelPath = Path.Combine(ModelsDir, fileName);
         if (File.Exists(modelPath))
         {
-            Console.WriteLine($"[モデル] Whisper モデル: {modelPath} (キャッシュ済み)");
+            Console.WriteLine($"[モデル] Whisper {size} モデル: {modelPath} (キャッシュ済み)");
             return modelPath;
         }
 
         Directory.CreateDirectory(ModelsDir);
 
-        Console.WriteLine("[モデル] Whisper base モデルをダウンロード中 (~142MB)...");
+        // Hugging Face から直接ダウンロード (進捗表示付き)
+        string url = $"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{fileName}";
 
-        // Whisper.net の組み込みダウンローダーを使用
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine($"[モデル] Whisper {size} モデルをダウンロード中...");
+        Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.WriteLine($"  URL: {url}");
+        Console.ResetColor();
+
+        string tempPath = modelPath + ".tmp";
+
         using var http = new HttpClient();
-        http.Timeout = TimeSpan.FromMinutes(10);
-        var downloader = new Whisper.net.Ggml.WhisperGgmlDownloader(http);
-        using var modelStream = await downloader
-            .GetGgmlModelAsync(Whisper.net.Ggml.GgmlType.Base);
+        http.Timeout = TimeSpan.FromHours(1); // large モデルは時間がかかる
 
-        using var fileStream = File.Create(modelPath);
+        using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
 
-        var buffer = new byte[81920];
+        long? totalBytes = response.Content.Headers.ContentLength;
+        using var contentStream = await response.Content.ReadAsStreamAsync();
+        using var fileStream = File.Create(tempPath);
+
+        var buffer = new byte[131072]; // 128KB バッファ
         long totalRead = 0;
         int read;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        while ((read = await modelStream.ReadAsync(buffer)) > 0)
+        while ((read = await contentStream.ReadAsync(buffer)) > 0)
         {
             await fileStream.WriteAsync(buffer.AsMemory(0, read));
             totalRead += read;
-            Console.Write($"\r[モデル]   ダウンロード: {totalRead / 1024 / 1024}MB   ");
+
+            // 進捗表示 (500ms ごと)
+            if (sw.ElapsedMilliseconds > 500 || read == 0)
+            {
+                sw.Restart();
+                double mbRead = totalRead / (1024.0 * 1024.0);
+                if (totalBytes.HasValue && totalBytes > 0)
+                {
+                    double mbTotal = totalBytes.Value / (1024.0 * 1024.0);
+                    int pct = (int)(totalRead * 100 / totalBytes.Value);
+                    Console.Write($"\r  [{pct,3}%] {mbRead:F1} / {mbTotal:F0} MB   ");
+                }
+                else
+                {
+                    Console.Write($"\r  {mbRead:F1} MB   ");
+                }
+            }
         }
         Console.WriteLine();
+
+        fileStream.Close();
+        File.Move(tempPath, modelPath, overwrite: true);
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"[モデル] Whisper モデルの準備完了: {modelPath}");

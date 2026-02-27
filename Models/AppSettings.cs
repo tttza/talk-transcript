@@ -19,6 +19,12 @@ public class AppSettings
     /// <summary>スピーカーデバイスの表示名 (確認用)</summary>
     public string? SpeakerDeviceName { get; set; }
 
+    /// <summary>認識エンジン名 (vosk / sapi / whisper-tiny / whisper-base など)</summary>
+    public string? EngineName { get; set; }
+
+    /// <summary>Whisper で GPU を使用するか (CUDA ランタイム導入時のみ有効)</summary>
+    public bool UseGpu { get; set; } = true;
+
     // ── 永続化 ──
 
     private static readonly JsonSerializerOptions JsonOptions = new()
