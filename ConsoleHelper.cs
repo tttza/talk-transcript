@@ -55,3 +55,54 @@ internal static class ConsoleHelper
         }
     }
 }
+
+/// <summary>
+/// コンソールにスピナーアニメーションを表示する。
+/// Dispose() で停止・行クリアする。
+/// </summary>
+internal sealed class ConsoleSpinner : IDisposable
+{
+    private static readonly string[] Frames = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
+    private readonly string _message;
+    private readonly Thread _thread;
+    private volatile bool _stopped;
+    private int _lastLen;
+
+    public ConsoleSpinner(string message)
+    {
+        _message = message;
+        _thread = new Thread(Spin) { IsBackground = true };
+        _thread.Start();
+    }
+
+    private void Spin()
+    {
+        int i = 0;
+        try
+        {
+            while (!_stopped)
+            {
+                var text = $"\r  {Frames[i % Frames.Length]} {_message}";
+                _lastLen = text.Length;
+                Console.ForegroundColor = ConsoleColor.DarkYellow;
+                Console.Write(text);
+                Console.ResetColor();
+                Thread.Sleep(80);
+                i++;
+            }
+        }
+        catch { /* console disposed etc. */ }
+    }
+
+    public void Dispose()
+    {
+        if (_stopped) return;
+        _stopped = true;
+        _thread.Join(2000);
+        try
+        {
+            Console.Write("\r" + new string(' ', Math.Max(_lastLen, 1)) + "\r");
+        }
+        catch { }
+    }
+}

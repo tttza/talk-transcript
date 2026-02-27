@@ -657,8 +657,7 @@ void SetupCudaRuntime()
         var fullPath = Path.Combine(cudaDir, dll);
         if (File.Exists(fullPath))
         {
-            if (NativeLibrary.TryLoad(fullPath, out _))
-                Console.WriteLine($"  [CUDA] {dll} をプリロード");
+            NativeLibrary.TryLoad(fullPath, out _);
         }
     }
 }

@@ -2,6 +2,7 @@ using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using TalkTranscript.Models;
 using Whisper.net;
+using TalkTranscript;
 
 namespace TalkTranscript.Transcribers;
 
@@ -65,9 +66,11 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     /// <summary>バッファ全体の RMS がこの値未満なら実質無音とみなしスキップ (Whisper ハルシネーション防止)</summary>
     private const float MinRmsEnergy = 150f;
     /// <summary>最小バッファ秒数 (短すぎるチャンクは精度が低い)</summary>
-    private const double MinBufferSec = 2.0;
+    private const double MinBufferSec = 1.0;
     /// <summary>最大バッファ秒数 (長い発話でもここで強制処理)</summary>
     private const double MaxBufferSec = 15.0;
+    /// <summary>短い発話を救済する長い無音判定時間 (ms)。バッファが最小長未満でもこの時間無音が続けば処理する</summary>
+    private const int LongSilenceMs = 2000;
 
     // ── 統計 ──
     private int _micChunks;
@@ -296,23 +299,24 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
             lock (bufLock)
             {
-                if (buffer.Length < minBytes)
-                    continue; // 最小バッファ未満→待機
+                if (buffer.Length == 0)
+                    continue;
 
                 var lastVoice = getLastVoiceTime();
                 double silenceMs = (DateTime.UtcNow - lastVoice).TotalMilliseconds;
                 bool silenceDetected = lastVoice != DateTime.MinValue && silenceMs >= SilenceTimeoutMs;
                 bool maxReached = buffer.Length >= maxBytes;
 
-                if (silenceDetected || maxReached)
+                // 通常: バッファ >= 最小長 かつ (無音検出 or 最大到達)
+                // 短い発話救済: バッファ < 最小長 でも長い無音が続けば処理
+                bool normalProcess = buffer.Length >= minBytes && (silenceDetected || maxReached);
+                bool shortUtterance = buffer.Length > 0 && buffer.Length < minBytes
+                                   && lastVoice != DateTime.MinValue && silenceMs >= LongSilenceMs;
+
+                if (normalProcess || shortUtterance)
                 {
                     pcmData = buffer.ToArray();
                     buffer.SetLength(0);
-
-                    if (maxReached && !silenceDetected)
-                        Console.ForegroundColor = ConsoleColor.DarkGray;
-                        Console.WriteLine($"  [{speaker}] バッファ最大長到達、強制処理");
-                        Console.ResetColor();
                 }
             }
 
@@ -325,13 +329,11 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             }
         }
 
-        // 停止時: 残りのバッファを処理 (最小バッファ以上のみ)
+        // 停止時: 残りのバッファをすべて処理
         byte[]? remaining;
         lock (bufLock)
         {
-            remaining = buffer.Length >= minBytes
-                ? buffer.ToArray()
-                : null;
+            remaining = buffer.Length > 0 ? buffer.ToArray() : null;
             buffer.SetLength(0);
         }
 
@@ -348,47 +350,44 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         // バッファ全体の RMS エネルギーを確認—実質無音ならスキップ
         float rms = CalcRms(pcm16, pcm16.Length);
         if (rms < MinRmsEnergy)
-        {
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine($"  [{speaker}] RMS={rms:F0} が低いためスキップ");
-            Console.ResetColor();
             return "";
-        }
 
         try
         {
             double durationSec = pcm16.Length / (double)(TargetFormat.SampleRate * 2);
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine($"  [{speaker}] {durationSec:F1}秒の音声を処理中...");
-            Console.ResetColor();
 
-            var builder = _factory.CreateBuilder()
-                .WithLanguage("ja")
-                .WithThreads(Math.Max(1, Environment.ProcessorCount / 2));
-
-            // 前回の認識結果を prompt として渡し、文脈を維持
-            if (!string.IsNullOrEmpty(prompt))
-                builder = builder.WithPrompt(prompt);
-
-            using var processor = builder.Build();
-
-            using var wavStream = new MemoryStream();
-            WriteWavPcm16(wavStream, pcm16, TargetFormat.SampleRate);
-            wavStream.Position = 0;
-
-            var task = Task.Run(async () =>
+            List<(TimeSpan Start, TimeSpan End, string Text)> results;
+            using (var spinner = new ConsoleSpinner($"[{speaker}] {durationSec:F1}秒の音声を処理中..."))
             {
-                var segments = new List<(TimeSpan Start, TimeSpan End, string Text)>();
-                await foreach (var seg in processor.ProcessAsync(wavStream))
-                {
-                    string text = seg.Text?.Trim() ?? "";
-                    if (!string.IsNullOrWhiteSpace(text))
-                        segments.Add((seg.Start, seg.End, text));
-                }
-                return segments;
-            });
+                var builder = _factory.CreateBuilder()
+                    .WithLanguage("ja")
+                    .WithThreads(Math.Max(1, Environment.ProcessorCount / 2));
 
-            var results = task.GetAwaiter().GetResult();
+                // 前回の認識結果を prompt として渡し、文脈を維持
+                if (!string.IsNullOrEmpty(prompt))
+                    builder = builder.WithPrompt(prompt);
+
+                using var processor = builder.Build();
+
+                using var wavStream = new MemoryStream();
+                WriteWavPcm16(wavStream, pcm16, TargetFormat.SampleRate);
+                wavStream.Position = 0;
+
+                var task = Task.Run(async () =>
+                {
+                    var segments = new List<(TimeSpan Start, TimeSpan End, string Text)>();
+                    await foreach (var seg in processor.ProcessAsync(wavStream))
+                    {
+                        string text = seg.Text?.Trim() ?? "";
+                        if (!string.IsNullOrWhiteSpace(text))
+                            segments.Add((seg.Start, seg.End, text));
+                    }
+                    return segments;
+                });
+
+                results = task.GetAwaiter().GetResult();
+            }
+
             var sb = new System.Text.StringBuilder();
 
             foreach (var (start, end, text) in results)
