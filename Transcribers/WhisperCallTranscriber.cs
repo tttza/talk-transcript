@@ -2,7 +2,6 @@ using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using TalkTranscript.Models;
 using Whisper.net;
-using TalkTranscript;
 
 namespace TalkTranscript.Transcribers;
 
@@ -95,6 +94,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
     public event Action<TranscriptEntry>? OnTranscribed;
 
+    /// <summary>Whisper 処理開始時に発火 (speaker, durationSec)</summary>
+    public event Action<string, double>? OnProcessingStarted;
+
+    /// <summary>Whisper 処理完了時に発火 (speaker)</summary>
+    public event Action<string>? OnProcessingCompleted;
+
     /// <param name="whisperModelPath">Whisper GGML モデルファイルへのパス</param>
     /// <param name="modelSize">モデル名 (ログ表示用: "tiny", "base" など)</param>
     /// <param name="useGpu">true で GPU (CUDA) を使用</param>
@@ -146,28 +151,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     public void Start()
     {
         _micCapture.DataAvailable += OnMicDataAvailable;
-        _micCapture.RecordingStopped += (_, e) =>
-        {
-            if (e.Exception != null)
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"  マイクエラー: {e.Exception.Message}");
-                Console.ResetColor();
-            }
-        };
+        _micCapture.RecordingStopped += (_, _) => { };
 
         _loopbackFormat = _speakerCapture.WaveFormat;
 
         _speakerCapture.DataAvailable += OnSpeakerDataAvailable;
-        _speakerCapture.RecordingStopped += (_, e) =>
-        {
-            if (e.Exception != null)
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"  スピーカーエラー: {e.Exception.Message}");
-                Console.ResetColor();
-            }
-        };
+        _speakerCapture.RecordingStopped += (_, _) => { };
 
         // 認識処理スレッドを起動
         _micProcessThread = new Thread(MicProcessLoop)
@@ -217,13 +206,6 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         {
             _micBuffer.Write(e.Buffer, 0, e.BytesRecorded);
         }
-
-        if (_micChunks <= 1)
-        {
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine($"  [Whisper] マイク ピーク={peak}");
-            Console.ResetColor();
-        }
     }
 
     // ────────────────────────────────────────────────
@@ -256,13 +238,6 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         lock (_spkBufLock)
         {
             _speakerBuffer.Write(converted, 0, converted.Length);
-        }
-
-        if (_speakerChunks <= 1)
-        {
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine($"  [Whisper] スピーカー ピーク={peak}");
-            Console.ResetColor();
         }
     }
 
@@ -356,8 +331,10 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         {
             double durationSec = pcm16.Length / (double)(TargetFormat.SampleRate * 2);
 
+            OnProcessingStarted?.Invoke(speaker, durationSec);
+
             List<(TimeSpan Start, TimeSpan End, string Text)> results;
-            using (var spinner = new ConsoleSpinner($"[{speaker}] {durationSec:F1}秒の音声を処理中..."))
+            try
             {
                 var builder = _factory.CreateBuilder()
                     .WithLanguage("ja")
@@ -387,6 +364,10 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
                 results = task.GetAwaiter().GetResult();
             }
+            finally
+            {
+                OnProcessingCompleted?.Invoke(speaker);
+            }
 
             var sb = new System.Text.StringBuilder();
 
@@ -410,11 +391,8 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
             return sb.ToString();
         }
-        catch (Exception ex)
+        catch
         {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"  [{speaker}] 認識エラー: {ex.Message}");
-            Console.ResetColor();
             return "";
         }
     }

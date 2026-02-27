@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="Spectre.Console" Version="0.54.0" />
     <PackageReference Include="System.Management" Version="10.0.3" />
     <PackageReference Include="System.Speech" Version="8.0.0" />
     <PackageReference Include="Vosk" Version="0.3.38" />

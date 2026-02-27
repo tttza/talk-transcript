@@ -5,6 +5,7 @@ using TalkTranscript.Transcribers;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Speech.Recognition;
+using Spectre.Console;
 using Vosk;
 
 // ── 初期化 ──
@@ -58,13 +59,10 @@ if (useGpu && cudaAvailable)
 else if (useGpu && !cudaAvailable)
 {
     useGpu = false;
-    Console.ForegroundColor = ConsoleColor.Yellow;
-    Console.WriteLine("  ⚠ CUDA Toolkit (cublas64_13.dll) が見つかりません。CPU モードで動作します。");
-    Console.WriteLine("    GPU を有効化するには CUDA Toolkit 13 をインストールしてください:");
-    Console.ForegroundColor = ConsoleColor.DarkCyan;
-    Console.WriteLine("    https://developer.nvidia.com/cuda-downloads");
-    Console.ResetColor();
-    Console.WriteLine();
+    AnsiConsole.MarkupLine("  [yellow]⚠ CUDA Toolkit (cublas64_13.dll) が見つかりません。CPU モードで動作します。[/]");
+    AnsiConsole.MarkupLine("    GPU を有効化するには CUDA Toolkit 13 をインストールしてください:");
+    AnsiConsole.MarkupLine("    [link]https://developer.nvidia.com/cuda-downloads[/]");
+    AnsiConsole.WriteLine();
 }
 
 // ── 診断モード ──
@@ -86,11 +84,6 @@ if (whisperOnly)
     await ModelManager.EnsureWhisperModelAsync(dlSize);
     Console.WriteLine("完了しました。");
     return;
-}
-
-if (!testMode)
-{
-    Console.TreatControlCAsInput = true;
 }
 
 if (!testMode)
@@ -139,10 +132,36 @@ int totalSpkCount = 0;
 bool quit = false;
 ICallTranscriber? lastTranscriber = null;
 
+// ── ×ボタン / プロセス終了時の安全なシャットダウン ──
+AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+{
+    try
+    {
+        lastTranscriber?.Stop();
+        lastTranscriber?.Dispose();
+        writer.Close();
+    }
+    catch { }
+};
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true; // プロセスを即死させない
+    try
+    {
+        lastTranscriber?.Stop();
+        lastTranscriber?.Dispose();
+        writer.Close();
+    }
+    catch { }
+    Environment.Exit(0);
+};
+
 while (!quit)
 {
     // ── バナー表示 ──
-    PrintBanner(engineName, useGpu, micDevice, speakerDevice, filePath, testMode, testSeconds);
+    SpectreUI.PrintBanner(engineName, useGpu, micDevice.FriendlyName,
+                          speakerDevice.FriendlyName, Path.GetFileName(filePath),
+                          testMode, testSeconds);
 
     // ── Whisper モデルサイズ解析 ──
     whisperModelSize = engineName.StartsWith("whisper-")
@@ -170,24 +189,27 @@ while (!quit)
     lastTranscriber = callTranscriber;
     int sessionMic = 0, sessionSpk = 0;
 
+    // ── SpectreUI セットアップ ──
+    var ui = new SpectreUI();
+    ui.Configure(engineName, useGpu, micDevice.FriendlyName, speakerDevice.FriendlyName,
+                 Path.GetFileName(filePath), testMode, testSeconds);
+
     void OnTranscribed(TranscriptEntry entry)
     {
-        var icon = entry.Speaker == "自分" ? "▶" : "◀";
-        var color = entry.Speaker == "自分" ? ConsoleColor.Cyan : ConsoleColor.Yellow;
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.Write($"  {entry.Timestamp:HH:mm:ss} ");
-        Console.ForegroundColor = color;
-        Console.Write($"{icon} {entry.Speaker}: ");
-        Console.ResetColor();
-        Console.WriteLine(entry.Text);
-
+        ui.AddEntry(entry);
         writer.Append(entry);
-
         if (entry.Speaker == "自分") { sessionMic++; totalMicCount++; }
         else { sessionSpk++; totalSpkCount++; }
     }
 
     callTranscriber.OnTranscribed += OnTranscribed;
+
+    // ── Whisper 処理中通知 ──
+    if (callTranscriber is WhisperCallTranscriber wt)
+    {
+        wt.OnProcessingStarted += (speaker, dur) => ui.SetProcessing(speaker, dur);
+        wt.OnProcessingCompleted += speaker => ui.ClearProcessing(speaker);
+    }
 
     try
     {
@@ -195,47 +217,26 @@ while (!quit)
     }
     catch (Exception ex)
     {
-        Console.ForegroundColor = ConsoleColor.Red;
-        Console.WriteLine($"  音声認識の開始に失敗しました: {ex.Message}");
-        Console.ResetColor();
+        AnsiConsole.MarkupLine($"  [red]音声認識の開始に失敗しました: {Markup.Escape(ex.Message)}[/]");
         callTranscriber.Dispose();
         return;
     }
 
-    PrintRecordingBar(testMode, testSeconds);
+    // ── タイトルバー ──
+    if (!testMode)
+        Console.Title = "通話文字起こし ● 録音中";
 
-    // ── 経過時間表示タスク ──
-    using var cts = new CancellationTokenSource();
-    var elapsedTask = ShowElapsedAsync(overallStart, cts.Token);
-
-    // ── キー入力待ち ──
-    string action;
-    if (testMode)
-    {
-        Thread.Sleep(testSeconds * 1000);
-        action = "quit";
-    }
-    else
-    {
-        action = WaitForKeys();
-    }
-
-    cts.Cancel();
-    try { await elapsedTask; } catch { }
+    // ── Live 録音セッション ──
+    string action = ui.RunSession(overallStart);
 
     // ── 停止 ──
-    Console.WriteLine();
-    Console.ForegroundColor = ConsoleColor.DarkGray;
-    Console.WriteLine("  停止中...");
-    Console.ResetColor();
+    AnsiConsole.MarkupLine("[dim]  停止中...[/]");
     callTranscriber.Stop();
 
     // ── セッション統計 ──
     var sessionElapsed = DateTime.Now - overallStart;
-    Console.ForegroundColor = ConsoleColor.DarkGray;
-    Console.WriteLine($"  ─── セッション: 自分 {sessionMic}件 / 相手 {sessionSpk}件 ───");
-    Console.ResetColor();
-    Console.WriteLine();
+    AnsiConsole.MarkupLine($"[dim]  ─── セッション: 自分 {sessionMic}件 / 相手 {sessionSpk}件 ───[/]");
+    AnsiConsole.WriteLine();
 
     // ── アクション処理 ──
     switch (action)
@@ -248,14 +249,14 @@ while (!quit)
 
         case "device":
             callTranscriber.Dispose();
-            PrintSectionHeader("デバイス変更");
+            SpectreUI.PrintSectionHeader("デバイス変更");
             (micDevice, speakerDevice) = DeviceSelector.SelectDevices(settings);
             Console.WriteLine();
             break;
 
         case "engine":
             callTranscriber.Dispose();
-            PrintSectionHeader("エンジン変更");
+            SpectreUI.PrintSectionHeader("エンジン変更");
             var newEngine = SelectEngineMenu(engineName);
             if (newEngine != null)
             {
@@ -271,9 +272,7 @@ while (!quit)
             callTranscriber.Dispose();
             if (!useGpu && !cudaAvailable)
             {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("  ⚠ CUDA Toolkit (cublas64_13.dll) が未インストールのため GPU に切り替えできません");
-                Console.ResetColor();
+                AnsiConsole.MarkupLine("  [yellow]⚠ CUDA Toolkit (cublas64_13.dll) が未インストールのため GPU に切り替えできません[/]");
             }
             else
             {
@@ -281,9 +280,10 @@ while (!quit)
                 var gs = AppSettings.Load();
                 gs.UseGpu = useGpu;
                 gs.Save();
-                Console.ForegroundColor = useGpu ? ConsoleColor.Green : ConsoleColor.Yellow;
-                Console.WriteLine($"  → {(useGpu ? "GPU (CUDA)" : "CPU")} モードに切り替えました");
-                Console.ResetColor();
+                if (useGpu)
+                    AnsiConsole.MarkupLine("  [green]→ GPU (CUDA) モードに切り替えました[/]");
+                else
+                    AnsiConsole.MarkupLine("  [yellow]→ CPU モードに切り替えました[/]");
             }
             Console.WriteLine();
             break;
@@ -295,155 +295,11 @@ while (!quit)
 
 // ── 最終出力 ──
 writer.Close();
-Console.WriteLine();
-Console.ForegroundColor = ConsoleColor.Green;
-Console.Write("  ✓ ");
-Console.ResetColor();
-Console.Write("保存先: ");
-Console.ForegroundColor = ConsoleColor.White;
-Console.WriteLine(filePath);
-Console.ResetColor();
-
-var total = DateTime.Now - overallStart;
-Console.ForegroundColor = ConsoleColor.DarkGray;
-Console.WriteLine($"  合計: 自分 {totalMicCount}件 / 相手 {totalSpkCount}件 / 経過 {total:hh\\:mm\\:ss}");
-Console.ResetColor();
-Console.WriteLine();
+SpectreUI.PrintSummary(filePath, totalMicCount, totalSpkCount, DateTime.Now - overallStart);
 
 // ══════════════════════════════════════════════════
 //  ヘルパー関数
 // ══════════════════════════════════════════════════
-
-void PrintBanner(string engine, bool useGpu, NAudio.CoreAudioApi.MMDevice mic, NAudio.CoreAudioApi.MMDevice spk,
-                 string file, bool test, int sec)
-{
-    Console.ForegroundColor = ConsoleColor.White;
-    Console.WriteLine();
-    Console.WriteLine("  ╔══════════════════════════════════════╗");
-    Console.WriteLine("  ║      通話文字起こしツール             ║");
-    Console.WriteLine("  ╚══════════════════════════════════════╝");
-    Console.ResetColor();
-    Console.WriteLine();
-
-    if (test)
-    {
-        Console.ForegroundColor = ConsoleColor.Magenta;
-        Console.WriteLine($"  [テストモード] {sec}秒後に自動停止");
-        Console.ResetColor();
-        Console.WriteLine();
-    }
-
-    Console.ForegroundColor = ConsoleColor.DarkGray;
-    Console.Write("  エンジン    : ");
-    Console.ForegroundColor = ConsoleColor.White;
-    Console.Write(engine.ToUpperInvariant());
-    if (engine.StartsWith("whisper"))
-    {
-        Console.ForegroundColor = useGpu ? ConsoleColor.Green : ConsoleColor.DarkGray;
-        Console.Write(useGpu ? "  [GPU]" : "  [CPU]");
-    }
-    Console.ResetColor();
-    Console.WriteLine();
-
-    Console.ForegroundColor = ConsoleColor.DarkGray;
-    Console.Write("  マイク      : ");
-    Console.ForegroundColor = ConsoleColor.Cyan;
-    Console.WriteLine(mic.FriendlyName);
-
-    Console.ForegroundColor = ConsoleColor.DarkGray;
-    Console.Write("  スピーカー  : ");
-    Console.ForegroundColor = ConsoleColor.Yellow;
-    Console.WriteLine(spk.FriendlyName);
-
-    Console.ForegroundColor = ConsoleColor.DarkGray;
-    Console.Write("  出力先      : ");
-    Console.ForegroundColor = ConsoleColor.White;
-    Console.WriteLine(Path.GetFileName(file));
-    Console.ResetColor();
-    Console.WriteLine();
-}
-
-void PrintRecordingBar(bool test, int sec)
-{
-    Console.ForegroundColor = ConsoleColor.Green;
-    Console.Write("  ● 録音中");
-    Console.ResetColor();
-
-    if (!test)
-    {
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.Write("  │  ");
-        Console.ForegroundColor = ConsoleColor.White;
-        Console.Write("Ctrl+Q");
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.Write(" 停止  ");
-        Console.ForegroundColor = ConsoleColor.White;
-        Console.Write("Ctrl+D");
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.Write(" デバイス  ");
-        Console.ForegroundColor = ConsoleColor.White;
-        Console.Write("Ctrl+E");
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.Write(" エンジン  ");
-        Console.ForegroundColor = ConsoleColor.White;
-        Console.Write("Ctrl+G");
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.Write(" GPU切替");
-    }
-    Console.ResetColor();
-    Console.WriteLine();
-    Console.ForegroundColor = ConsoleColor.DarkGray;
-    Console.WriteLine("  ─────────────────────────────────────────────");
-    Console.ResetColor();
-    Console.WriteLine();
-}
-
-void PrintSectionHeader(string title)
-{
-    Console.ForegroundColor = ConsoleColor.DarkGray;
-    Console.WriteLine($"  ═══ {title} ═══");
-    Console.ResetColor();
-    Console.WriteLine();
-}
-
-string WaitForKeys()
-{
-    while (true)
-    {
-        if (!Console.KeyAvailable)
-        {
-            Thread.Sleep(100);
-            continue;
-        }
-
-        var key = Console.ReadKey(intercept: true);
-
-        if (key.Key == ConsoleKey.Q && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-            return "quit";
-        if (key.Key == ConsoleKey.D && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-            return "device";
-        if (key.Key == ConsoleKey.E && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-            return "engine";
-        if (key.Key == ConsoleKey.G && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-            return "gpu";
-    }
-}
-
-async Task ShowElapsedAsync(DateTime start, CancellationToken ct)
-{
-    try
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            await Task.Delay(30_000, ct);
-            var elapsed = DateTime.Now - start;
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine($"  ─── 経過 {elapsed:hh\\:mm\\:ss} ───");
-            Console.ResetColor();
-        }
-    }
-    catch (OperationCanceledException) { }
-}
 
 string? SelectEngineMenu(string currentEngine)
 {
@@ -555,13 +411,11 @@ void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
         long minBytes = 32_000 * 2; // 最低2秒
         if (micPcm.Length < minBytes && spkPcm.Length < minBytes)
         {
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine("  (録音が短すぎるため後処理スキップ)");
-            Console.ResetColor();
+            AnsiConsole.MarkupLine("  [dim](録音が短すぎるため後処理スキップ)[/]");
             return;
         }
 
-        Console.WriteLine("  Whisper 後処理を実行中...");
+        AnsiConsole.MarkupLine("  [dim]Whisper 後処理を実行中...[/]");
         try
         {
             var whisperEntries = WhisperPostProcessor.ProcessAsync(
@@ -573,24 +427,18 @@ void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
                 using var ww = new TranscriptWriter(fp);
                 foreach (var entry in whisperEntries) ww.Append(entry);
                 ww.Close();
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("  Whisper 後処理で更新しました。");
-                Console.ResetColor();
+                AnsiConsole.MarkupLine("  [green]Whisper 後処理で更新しました。[/]");
                 return;
             }
         }
         catch (Exception ex)
         {
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine($"  Whisper 後処理エラー: {ex.Message}");
-            Console.ResetColor();
+            AnsiConsole.MarkupLine($"  [yellow]Whisper 後処理エラー: {Markup.Escape(ex.Message)}[/]");
         }
     }
     else if (whisperPostModelPath == null && hasRecording && whisperSize == null)
     {
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.WriteLine("  (Whisper モデルなし → 後処理スキップ。dotnet run -- --whisper-only でダウンロード可能)");
-        Console.ResetColor();
+        AnsiConsole.MarkupLine("  [dim](Whisper モデルなし → 後処理スキップ。dotnet run -- --whisper-only でダウンロード可能)[/]");
     }
 }
 
