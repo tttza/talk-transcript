@@ -169,6 +169,10 @@ while (!quit)
         : null;
 
     // ── トランスクライバ作成 ──
+    // 後処理 (Whisper 再認識) が可能な場合のみ録音バッファを有効化
+    bool canPostProcess = whisperModelSize == null
+        && (ModelManager.GetWhisperModelPath("base") != null || ModelManager.GetWhisperModelPath("tiny") != null);
+
     ICallTranscriber callTranscriber;
     if (whisperModelSize != null)
     {
@@ -179,7 +183,8 @@ while (!quit)
     {
         string voskModelPath = await ModelManager.EnsureVoskModelAsync();
         var voskModel = new Model(voskModelPath);
-        callTranscriber = new VoskCallTranscriber(voskModel, micDevice, speakerDevice);
+        callTranscriber = new VoskCallTranscriber(voskModel, micDevice, speakerDevice,
+            ownsModel: true, enableRecording: canPostProcess);
     }
     else
     {

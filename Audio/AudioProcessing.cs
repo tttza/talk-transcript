@@ -1,3 +1,4 @@
+using System.Buffers;
 using NAudio.Wave;
 
 namespace TalkTranscript.Audio;
@@ -28,43 +29,50 @@ internal static class AudioProcessing
 
         if (sampleCount == 0) return Array.Empty<byte>();
 
-        // ソースのモノラル float サンプルを生成
-        float[] monoSamples = new float[sampleCount];
-        for (int i = 0; i < sampleCount; i++)
+        // ソースのモノラル float サンプルを生成 (ArrayPool で再利用)
+        float[] monoSamples = ArrayPool<float>.Shared.Rent(sampleCount);
+        try
         {
-            float sum = 0f;
-            for (int ch = 0; ch < channels; ch++)
+            for (int i = 0; i < sampleCount; i++)
             {
-                int offset = (i * channels + ch) * bytesPerSample;
-                if (offset + 4 <= length)
-                    sum += BitConverter.ToSingle(source, offset);
+                float sum = 0f;
+                for (int ch = 0; ch < channels; ch++)
+                {
+                    int offset = (i * channels + ch) * bytesPerSample;
+                    if (offset + 4 <= length)
+                        sum += BitConverter.ToSingle(source, offset);
+                }
+                monoSamples[i] = Math.Clamp(sum / channels, -1.0f, 1.0f);
             }
-            monoSamples[i] = Math.Clamp(sum / channels, -1.0f, 1.0f);
+
+            // リサンプリング比率
+            double ratio = (double)sourceFormat.SampleRate / targetFormat.SampleRate;
+            int outputSamples = (int)(sampleCount / ratio);
+            if (outputSamples == 0) return Array.Empty<byte>();
+
+            byte[] result = new byte[outputSamples * 2]; // 16bit = 2 bytes
+
+            for (int i = 0; i < outputSamples; i++)
+            {
+                // リニア補間で滑らかにリサンプル
+                double srcPos = i * ratio;
+                int idx0 = (int)srcPos;
+                int idx1 = Math.Min(idx0 + 1, sampleCount - 1);
+                float frac = (float)(srcPos - idx0);
+
+                float sample = monoSamples[idx0] * (1f - frac) + monoSamples[idx1] * frac;
+                short pcm = (short)(Math.Clamp(sample, -1.0f, 1.0f) * 32767);
+
+                result[i * 2] = (byte)(pcm & 0xFF);
+                result[i * 2 + 1] = (byte)((pcm >> 8) & 0xFF);
+            }
+
+            return result;
         }
-
-        // リサンプリング比率
-        double ratio = (double)sourceFormat.SampleRate / targetFormat.SampleRate;
-        int outputSamples = (int)(sampleCount / ratio);
-        if (outputSamples == 0) return Array.Empty<byte>();
-
-        byte[] result = new byte[outputSamples * 2]; // 16bit = 2 bytes
-
-        for (int i = 0; i < outputSamples; i++)
+        finally
         {
-            // リニア補間で滑らかにリサンプル
-            double srcPos = i * ratio;
-            int idx0 = (int)srcPos;
-            int idx1 = Math.Min(idx0 + 1, sampleCount - 1);
-            float frac = (float)(srcPos - idx0);
-
-            float sample = monoSamples[idx0] * (1f - frac) + monoSamples[idx1] * frac;
-            short pcm = (short)(Math.Clamp(sample, -1.0f, 1.0f) * 32767);
-
-            result[i * 2] = (byte)(pcm & 0xFF);
-            result[i * 2 + 1] = (byte)((pcm >> 8) & 0xFF);
+            ArrayPool<float>.Shared.Return(monoSamples);
         }
-
-        return result;
     }
 
     /// <summary>PCM 16bit バッファ内のピーク振幅を返す</summary>

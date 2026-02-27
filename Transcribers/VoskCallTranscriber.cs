@@ -21,6 +21,7 @@ public sealed class VoskCallTranscriber : ICallTranscriber
 {
     // ── Vosk モデル & 認識器 ──
     private readonly Model _model;
+    private readonly bool _ownsModel;
     private VoskRecognizer? _micRecognizer;
     private VoskRecognizer? _speakerRecognizer;
 
@@ -29,8 +30,9 @@ public sealed class VoskCallTranscriber : ICallTranscriber
     private readonly WasapiLoopbackCapture _speakerCapture;
 
     // ── 録音バッファ (Whisper 後処理用) ──
-    private readonly MemoryStream _micRecording = new();
-    private readonly MemoryStream _speakerRecording = new();
+    private readonly bool _enableRecording;
+    private readonly MemoryStream? _micRecording;
+    private readonly MemoryStream? _speakerRecording;
     private readonly object _micRecLock = new();
     private readonly object _speakerRecLock = new();
 
@@ -67,9 +69,19 @@ public sealed class VoskCallTranscriber : ICallTranscriber
 
     public event Action<TranscriptEntry>? OnTranscribed;
 
-    public VoskCallTranscriber(Model voskModel, MMDevice micDevice, MMDevice speakerDevice)
+    /// <param name="ownsModel">true のとき Dispose 時に Model も破棄する</param>
+    /// <param name="enableRecording">true で録音バッファを保持する (後処理用)</param>
+    public VoskCallTranscriber(Model voskModel, MMDevice micDevice, MMDevice speakerDevice,
+        bool ownsModel = false, bool enableRecording = false)
     {
         _model = voskModel;
+        _ownsModel = ownsModel;
+        _enableRecording = enableRecording;
+        if (enableRecording)
+        {
+            _micRecording = new MemoryStream();
+            _speakerRecording = new MemoryStream();
+        }
 
         // ── マイク: WaveInEvent (MME API) ──
         int deviceNumber = FindWaveInDevice(micDevice);
@@ -161,9 +173,12 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         _micChunks++;
 
         // 録音バッファに保存 (Whisper 後処理用)
-        lock (_micRecLock)
+        if (_enableRecording)
         {
-            _micRecording.Write(e.Buffer, 0, e.BytesRecorded);
+            lock (_micRecLock)
+            {
+                _micRecording!.Write(e.Buffer, 0, e.BytesRecorded);
+            }
         }
 
         // 初回ログ
@@ -198,9 +213,12 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         if (converted.Length == 0) return;
 
         // 録音バッファに保存 (Whisper 後処理用)
-        lock (_speakerRecLock)
+        if (_enableRecording)
         {
-            _speakerRecording.Write(converted, 0, converted.Length);
+            lock (_speakerRecLock)
+            {
+                _speakerRecording!.Write(converted, 0, converted.Length);
+            }
         }
 
         // 初回ログ
@@ -314,8 +332,8 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         }
 
         long micBytes, spkBytes;
-        lock (_micRecLock) micBytes = _micRecording.Length;
-        lock (_speakerRecLock) spkBytes = _speakerRecording.Length;
+        lock (_micRecLock) micBytes = _micRecording?.Length ?? 0;
+        lock (_speakerRecLock) spkBytes = _speakerRecording?.Length ?? 0;
 
 
     }
@@ -325,12 +343,14 @@ public sealed class VoskCallTranscriber : ICallTranscriber
     // ────────────────────────────────────────────────
     public byte[] GetMicRecording()
     {
-        lock (_micRecLock) return _micRecording.ToArray();
+        if (!_enableRecording) return Array.Empty<byte>();
+        lock (_micRecLock) return _micRecording!.ToArray();
     }
 
     public byte[] GetSpeakerRecording()
     {
-        lock (_speakerRecLock) return _speakerRecording.ToArray();
+        if (!_enableRecording) return Array.Empty<byte>();
+        lock (_speakerRecLock) return _speakerRecording!.ToArray();
     }
 
     // ────────────────────────────────────────────────
@@ -348,8 +368,12 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         _speakerCapture.Dispose();
         _micRecognizer?.Dispose();
         _speakerRecognizer?.Dispose();
-        _micRecording.Dispose();
-        _speakerRecording.Dispose();
+        _micRecording?.Dispose();
+        _speakerRecording?.Dispose();
+
+        // 所有権がある場合のみ Model を破棄
+        if (_ownsModel)
+            _model.Dispose();
 
         GC.SuppressFinalize(this);
     }

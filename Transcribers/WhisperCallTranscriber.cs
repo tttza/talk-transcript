@@ -28,14 +28,15 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     private readonly WasapiLoopbackCapture _speakerCapture;
 
     // ── 音声バッファ ──
-    private readonly MemoryStream _micBuffer = new();
-    private readonly MemoryStream _speakerBuffer = new();
+    private MemoryStream _micBuffer = new();
+    private MemoryStream _speakerBuffer = new();
     private readonly object _micBufLock = new();
     private readonly object _spkBufLock = new();
 
     // ── 録音全体 (Whisper 後処理用) ──
-    private readonly MemoryStream _micRecording = new();
-    private readonly MemoryStream _speakerRecording = new();
+    private readonly bool _enableRecording;
+    private readonly MemoryStream? _micRecording;
+    private readonly MemoryStream? _speakerRecording;
     private readonly object _micRecLock = new();
     private readonly object _spkRecLock = new();
 
@@ -117,15 +118,23 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     /// <param name="whisperModelPath">Whisper GGML モデルファイルへのパス</param>
     /// <param name="modelSize">モデル名 (ログ表示用: "tiny", "base" など)</param>
     /// <param name="useGpu">true で GPU (CUDA) を使用</param>
+    /// <param name="enableRecording">true で録音バッファを保持する (後処理用)</param>
     public WhisperCallTranscriber(
         string whisperModelPath,
         string modelSize,
         MMDevice micDevice,
         MMDevice speakerDevice,
-        bool useGpu = true)
+        bool useGpu = true,
+        bool enableRecording = false)
     {
         _factory = WhisperFactory.FromPath(whisperModelPath, new WhisperFactoryOptions { UseGpu = useGpu });
         _modelSize = modelSize;
+        _enableRecording = enableRecording;
+        if (enableRecording)
+        {
+            _micRecording = new MemoryStream();
+            _speakerRecording = new MemoryStream();
+        }
 
         int deviceNumber = FindWaveInDevice(micDevice);
         _micCapture = new WaveInEvent
@@ -213,9 +222,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         }
 
         // 録音全体を保存 (後処理用)
-        lock (_micRecLock)
+        if (_enableRecording)
         {
-            _micRecording.Write(e.Buffer, 0, e.BytesRecorded);
+            lock (_micRecLock)
+            {
+                _micRecording!.Write(e.Buffer, 0, e.BytesRecorded);
+            }
         }
 
         // 無音スキップ: ピーク + エネルギー の二重判定
@@ -262,9 +274,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         _spkLastVoiceTime = DateTime.UtcNow;
 
         // 録音全体を保存
-        lock (_spkRecLock)
+        if (_enableRecording)
         {
-            _speakerRecording.Write(converted, 0, converted.Length);
+            lock (_spkRecLock)
+            {
+                _speakerRecording!.Write(converted, 0, converted.Length);
+            }
         }
 
         // 認識用バッファに追加
@@ -338,6 +353,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 {
                     pcmData = buffer.ToArray();
                     buffer.SetLength(0);
+                    buffer.Capacity = 0; // 内部バッファを解放してメモリ回収
                 }
             }
 
@@ -364,6 +380,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         {
             remaining = buffer.Length > 0 ? buffer.ToArray() : null;
             buffer.SetLength(0);
+            buffer.Capacity = 0;
         }
 
         if (remaining != null)
@@ -487,12 +504,14 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
     public byte[] GetMicRecording()
     {
-        lock (_micRecLock) return _micRecording.ToArray();
+        if (!_enableRecording) return Array.Empty<byte>();
+        lock (_micRecLock) return _micRecording!.ToArray();
     }
 
     public byte[] GetSpeakerRecording()
     {
-        lock (_spkRecLock) return _speakerRecording.ToArray();
+        if (!_enableRecording) return Array.Empty<byte>();
+        lock (_spkRecLock) return _speakerRecording!.ToArray();
     }
 
     public void Dispose()
@@ -508,8 +527,8 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         _factory.Dispose();
         _micBuffer.Dispose();
         _speakerBuffer.Dispose();
-        _micRecording.Dispose();
-        _speakerRecording.Dispose();
+        _micRecording?.Dispose();
+        _speakerRecording?.Dispose();
 
         GC.SuppressFinalize(this);
     }
