@@ -1,3 +1,4 @@
+using TalkTranscript.Audio;
 using TalkTranscript.Models;
 using Whisper.net;
 
@@ -9,6 +10,11 @@ namespace TalkTranscript.Transcribers;
 ///
 /// 入力: 16kHz / 16bit / mono の PCM バイト配列
 /// Whisper.net は 16kHz / float32 / mono を期待するため変換する。
+///
+/// 改善点:
+///   - ハルシネーションフィルタリング
+///   - 重複セグメント検出
+///   - 短いセグメントの統合
 /// </summary>
 public static class WhisperPostProcessor
 {
@@ -71,7 +77,7 @@ public static class WhisperPostProcessor
         var entries = new List<TranscriptEntry>();
 
         // 16bit PCM → float32 に変換
-        float[] samples = ConvertPcm16ToFloat(pcm16bit);
+        float[] samples = AudioProcessing.ConvertPcm16ToFloat(pcm16bit);
 
         using var processor = factory.CreateBuilder()
             .WithLanguage("ja")
@@ -80,13 +86,26 @@ public static class WhisperPostProcessor
 
         using var stream = new MemoryStream();
         // WAV ヘッダーを書き込んでから float サンプルを書き込む
-        WriteWavFloat(stream, samples, 16000);
+        AudioProcessing.WriteWavFloat(stream, samples, 16000);
         stream.Position = 0;
+
+        string lastText = "";
 
         await foreach (var segment in processor.ProcessAsync(stream))
         {
             string text = segment.Text?.Trim() ?? "";
             if (string.IsNullOrWhiteSpace(text)) continue;
+
+            // テキスト正規化
+            text = WhisperTextFilter.NormalizeText(text);
+
+            // ハルシネーションフィルター
+            if (WhisperTextFilter.IsHallucination(text))
+                continue;
+
+            // 重複テキスト検出
+            if (WhisperTextFilter.IsDuplicate(text, lastText))
+                continue;
 
             // Whisper のタイムスタンプから実際の時刻を算出
             var timestamp = callStartTime + segment.Start;
@@ -99,59 +118,51 @@ public static class WhisperPostProcessor
                 Duration: duration));
 
             Console.WriteLine($"[Whisper] [{segment.Start:mm\\:ss} → {segment.End:mm\\:ss}] {speaker}: {text}");
+            lastText = text;
         }
+
+        // 短いセグメントを統合 (同じ話者で 1秒未満のセグメントが連続する場合)
+        entries = MergeShortSegments(entries, speaker);
 
         return entries;
     }
 
-    /// <summary>16bit PCM バイト配列を float32 配列に変換する (-1.0 ～ 1.0)</summary>
-    private static float[] ConvertPcm16ToFloat(byte[] pcm)
+    /// <summary>
+    /// 同じ話者の短いセグメントを統合する。
+    /// 2秒以内の間隔で連続する短いセグメントを 1 つにまとめる。
+    /// </summary>
+    private static List<TranscriptEntry> MergeShortSegments(List<TranscriptEntry> entries, string speaker)
     {
-        int sampleCount = pcm.Length / 2;
-        float[] samples = new float[sampleCount];
+        if (entries.Count <= 1) return entries;
 
-        for (int i = 0; i < sampleCount; i++)
+        var merged = new List<TranscriptEntry>();
+        var current = entries[0];
+
+        for (int i = 1; i < entries.Count; i++)
         {
-            short s = BitConverter.ToInt16(pcm, i * 2);
-            samples[i] = s / 32768f;
-        }
+            var next = entries[i];
+            var gap = next.Timestamp - current.Timestamp - (current.Duration ?? TimeSpan.Zero);
+            bool isShort = (current.Duration ?? TimeSpan.FromSeconds(5)) < TimeSpan.FromSeconds(1.5);
 
-        return samples;
+            // 短いセグメントが 2秒以内の間隔で続く場合は結合
+            if (isShort && gap < TimeSpan.FromSeconds(2))
+            {
+                var combinedDuration = (next.Timestamp + (next.Duration ?? TimeSpan.Zero)) - current.Timestamp;
+                current = current with
+                {
+                    Text = current.Text + next.Text,
+                    Duration = combinedDuration
+                };
+            }
+            else
+            {
+                merged.Add(current);
+                current = next;
+            }
+        }
+        merged.Add(current);
+
+        return merged;
     }
 
-    /// <summary>float32 サンプルを WAV ファイル形式 (PCM float) でストリームに書き込む</summary>
-    private static void WriteWavFloat(Stream stream, float[] samples, int sampleRate)
-    {
-        using var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
-
-        int dataSize = samples.Length * 4; // float32 = 4 bytes
-        int channels = 1;
-        int bitsPerSample = 32;
-        int byteRate = sampleRate * channels * bitsPerSample / 8;
-        int blockAlign = channels * bitsPerSample / 8;
-
-        // RIFF header
-        writer.Write("RIFF"u8);
-        writer.Write(36 + dataSize);
-        writer.Write("WAVE"u8);
-
-        // fmt chunk (IEEE float)
-        writer.Write("fmt "u8);
-        writer.Write(16);                       // chunk size
-        writer.Write((short)3);                 // audio format: IEEE float
-        writer.Write((short)channels);
-        writer.Write(sampleRate);
-        writer.Write(byteRate);
-        writer.Write((short)blockAlign);
-        writer.Write((short)bitsPerSample);
-
-        // data chunk
-        writer.Write("data"u8);
-        writer.Write(dataSize);
-
-        foreach (var sample in samples)
-        {
-            writer.Write(sample);
-        }
-    }
 }

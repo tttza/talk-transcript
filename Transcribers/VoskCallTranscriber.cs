@@ -1,6 +1,7 @@
 using System.Text.Json;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using TalkTranscript.Audio;
 using TalkTranscript.Models;
 using Vosk;
 
@@ -168,7 +169,7 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         // 初回ログ
         if (_micChunks <= 1)
         {
-            short maxSample = CalcPeak(e.Buffer, e.BytesRecorded);
+            short maxSample = AudioProcessing.CalcPeak(e.Buffer, e.BytesRecorded);
             Console.ForegroundColor = ConsoleColor.DarkGray;
             Console.WriteLine($"  [Vosk] マイク ピーク={maxSample}");
             Console.ResetColor();
@@ -191,7 +192,7 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         _speakerChunks++;
 
         // フォーマット変換 (48kHz/32bit/2ch → 16kHz/16bit/mono)
-        byte[] converted = ConvertAudio(
+        byte[] converted = AudioProcessing.ConvertLoopbackToTarget(
             e.Buffer, e.BytesRecorded, _loopbackFormat!, TargetFormat);
 
         if (converted.Length == 0) return;
@@ -205,7 +206,7 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         // 初回ログ
         if (_speakerChunks <= 1)
         {
-            short maxSample = CalcPeak(converted, converted.Length);
+            short maxSample = AudioProcessing.CalcPeak(converted, converted.Length);
             Console.ForegroundColor = ConsoleColor.DarkGray;
             Console.WriteLine($"  [Vosk] スピーカー ピーク={maxSample}");
             Console.ResetColor();
@@ -213,7 +214,7 @@ public sealed class VoskCallTranscriber : ICallTranscriber
 
         // 無音フィルタ: ピークが閾値以下ならVoskへの供給をスキップ
         // (無音データを大量に流し続けるとVoskが不安定になる)
-        short peak = CalcPeak(converted, converted.Length);
+        short peak = AudioProcessing.CalcPeak(converted, converted.Length);
         if (peak < 50) return;
 
         // Vosk に音声データを供給
@@ -276,59 +277,11 @@ public sealed class VoskCallTranscriber : ICallTranscriber
     }
 
     // ────────────────────────────────────────────────
-    //  音声フォーマット変換
+    //  音声フォーマット変換 (共通関数へ委譲)
     // ────────────────────────────────────────────────
     private static byte[] ConvertAudio(
         byte[] source, int length, WaveFormat sourceFormat, WaveFormat targetFormat)
-    {
-        int bytesPerSample = sourceFormat.BitsPerSample / 8;
-        int channels = sourceFormat.Channels;
-        int sampleCount = length / (bytesPerSample * channels);
-
-        int ratio = sourceFormat.SampleRate / targetFormat.SampleRate;
-        if (ratio < 1) ratio = 1;
-
-        int outputSamples = sampleCount / ratio;
-        if (outputSamples == 0) return Array.Empty<byte>();
-
-        byte[] result = new byte[outputSamples * 2];
-
-        for (int i = 0; i < outputSamples; i++)
-        {
-            int srcIndex = i * ratio;
-
-            float sum = 0f;
-            for (int ch = 0; ch < channels; ch++)
-            {
-                int offset = (srcIndex * channels + ch) * bytesPerSample;
-                if (offset + 4 <= length)
-                {
-                    sum += BitConverter.ToSingle(source, offset);
-                }
-            }
-
-            float mono = sum / channels;
-            mono = Math.Clamp(mono, -1.0f, 1.0f);
-
-            short pcm = (short)(mono * 32767);
-            result[i * 2] = (byte)(pcm & 0xFF);
-            result[i * 2 + 1] = (byte)((pcm >> 8) & 0xFF);
-        }
-
-        return result;
-    }
-
-    private static short CalcPeak(byte[] buffer, int length)
-    {
-        short max = 0;
-        for (int j = 0; j + 1 < length; j += 2)
-        {
-            short s = BitConverter.ToInt16(buffer, j);
-            short abs = Math.Abs(s);
-            if (abs > max) max = abs;
-        }
-        return max;
-    }
+        => AudioProcessing.ConvertLoopbackToTarget(source, length, sourceFormat, targetFormat);
 
     // ────────────────────────────────────────────────
     //  停止

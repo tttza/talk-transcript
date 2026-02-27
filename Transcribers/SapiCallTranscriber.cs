@@ -213,13 +213,7 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         _micChunks++;
 
         // ピーク計算 (16bit PCM)
-        short maxSample = 0;
-        for (int j = 0; j + 1 < e.BytesRecorded; j += 2)
-        {
-            short s = BitConverter.ToInt16(e.Buffer, j);
-            short abs = Math.Abs(s);
-            if (abs > maxSample) maxSample = abs;
-        }
+        short maxSample = AudioProcessing.CalcPeak(e.Buffer, e.BytesRecorded);
         _micPeak = maxSample;
 
         // 初回ログ
@@ -255,19 +249,13 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         _speakerChunks++;
 
         // フォーマット変換 (48kHz/32bit/2ch → 16kHz/16bit/mono)
-        byte[] converted = ConvertAudio(
+        byte[] converted = AudioProcessing.ConvertLoopbackToTarget(
             e.Buffer, e.BytesRecorded, _loopbackFormat!, TargetFormat);
 
         if (converted.Length == 0) return;
 
         // ピーク計算 (変換後の16bit PCM)
-        short maxSample = 0;
-        for (int j = 0; j + 1 < converted.Length; j += 2)
-        {
-            short s = BitConverter.ToInt16(converted, j);
-            short abs = Math.Abs(s);
-            if (abs > maxSample) maxSample = abs;
-        }
+        short maxSample = AudioProcessing.CalcPeak(converted, converted.Length);
         _speakerPeak = maxSample;
 
         // 初回ログ
@@ -325,51 +313,15 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     }
 
     // ────────────────────────────────────────────────
-    //  音声フォーマット変換
+    //  音声フォーマット変換 (共通関数へ委譲)
     // ────────────────────────────────────────────────
     /// <summary>
     /// ループバック音声 (通常 IEEE Float 32bit) を 16kHz/16bit/mono に変換する。
-    /// サンプルレート変換は単純間引き (decimation) で行う。
+    /// リニア補間による高品質リサンプリングを使用。
     /// </summary>
     private static byte[] ConvertAudio(
         byte[] source, int length, WaveFormat sourceFormat, WaveFormat targetFormat)
-    {
-        int bytesPerSample = sourceFormat.BitsPerSample / 8;
-        int channels = sourceFormat.Channels;
-        int sampleCount = length / (bytesPerSample * channels);
-
-        int ratio = sourceFormat.SampleRate / targetFormat.SampleRate;
-        if (ratio < 1) ratio = 1;
-
-        int outputSamples = sampleCount / ratio;
-        if (outputSamples == 0) return Array.Empty<byte>();
-
-        byte[] result = new byte[outputSamples * 2]; // 16bit = 2 bytes
-
-        for (int i = 0; i < outputSamples; i++)
-        {
-            int srcIndex = i * ratio;
-
-            float sum = 0f;
-            for (int ch = 0; ch < channels; ch++)
-            {
-                int offset = (srcIndex * channels + ch) * bytesPerSample;
-                if (offset + 4 <= length)
-                {
-                    sum += BitConverter.ToSingle(source, offset);
-                }
-            }
-
-            float mono = sum / channels;
-            mono = Math.Clamp(mono, -1.0f, 1.0f);
-
-            short pcm = (short)(mono * 32767);
-            result[i * 2] = (byte)(pcm & 0xFF);
-            result[i * 2 + 1] = (byte)((pcm >> 8) & 0xFF);
-        }
-
-        return result;
-    }
+        => AudioProcessing.ConvertLoopbackToTarget(source, length, sourceFormat, targetFormat);
 
     // ────────────────────────────────────────────────
     //  認識イベントハンドラ

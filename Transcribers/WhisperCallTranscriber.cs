@@ -1,5 +1,6 @@
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using TalkTranscript.Audio;
 using TalkTranscript.Models;
 using Whisper.net;
 
@@ -53,23 +54,36 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     private DateTime _micLastVoiceTime = DateTime.MinValue;
     private DateTime _spkLastVoiceTime = DateTime.MinValue;
 
+    // ── VAD エネルギー履歴 (スライディングウィンドウ) ──
+    private readonly Queue<float> _micEnergyHistory = new();
+    private readonly Queue<float> _spkEnergyHistory = new();
+    private const int EnergyHistorySize = 10; // 直近10チャンク分
+
     // ── Prompt 引き継ぎ (文脈連続性) ──
     private string _micLastPrompt = "";
     private string _spkLastPrompt = "";
+    /// <summary>Prompt の最大長 (Whisper のトークン上限を考慮)</summary>
+    private const int MaxPromptLength = 200;
+
+    // ── 重複検出用: 直近の認識テキスト ──
+    private string _micLastText = "";
+    private string _spkLastText = "";
 
     // ── 設定 ──
     /// <summary>無音と判定するピーク閾値 (チャンク単位)</summary>
-    private const short SilenceThreshold = 200;
+    private const short SilenceThreshold = 250;
     /// <summary>発話終了とみなす無音持続時間 (ms)</summary>
-    private const int SilenceTimeoutMs = 800;
+    private const int SilenceTimeoutMs = 700;
     /// <summary>バッファ全体の RMS がこの値未満なら実質無音とみなしスキップ (Whisper ハルシネーション防止)</summary>
-    private const float MinRmsEnergy = 150f;
+    private const float MinRmsEnergy = 200f;
     /// <summary>最小バッファ秒数 (短すぎるチャンクは精度が低い)</summary>
-    private const double MinBufferSec = 1.0;
+    private const double MinBufferSec = 1.2;
     /// <summary>最大バッファ秒数 (長い発話でもここで強制処理)</summary>
-    private const double MaxBufferSec = 15.0;
+    private const double MaxBufferSec = 12.0;
     /// <summary>短い発話を救済する長い無音判定時間 (ms)。バッファが最小長未満でもこの時間無音が続けば処理する</summary>
     private const int LongSilenceMs = 2000;
+    /// <summary>エネルギーベースの VAD 閾値 (平均 RMS がこの値を超えたら音声あり)</summary>
+    private const float VadEnergyThreshold = 180f;
 
     // ── 統計 ──
     private int _micChunks;
@@ -187,7 +201,16 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
         _micChunks++;
 
-        short peak = CalcPeak(e.Buffer, e.BytesRecorded);
+        short peak = AudioProcessing.CalcPeak(e.Buffer, e.BytesRecorded);
+        float rms = AudioProcessing.CalcRms(e.Buffer, e.BytesRecorded);
+
+        // エネルギー履歴を更新 (スライディングウィンドウ VAD)
+        lock (_micBufLock)
+        {
+            _micEnergyHistory.Enqueue(rms);
+            while (_micEnergyHistory.Count > EnergyHistorySize)
+                _micEnergyHistory.Dequeue();
+        }
 
         // 録音全体を保存 (後処理用)
         lock (_micRecLock)
@@ -195,8 +218,8 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             _micRecording.Write(e.Buffer, 0, e.BytesRecorded);
         }
 
-        // 無音スキップ (Whisper は無音でハルシネーションするため)
-        if (peak < SilenceThreshold) return;
+        // 無音スキップ: ピーク + エネルギー の二重判定
+        if (peak < SilenceThreshold && rms < VadEnergyThreshold) return;
 
         // VAD: 音声がある時刻を記録
         _micLastVoiceTime = DateTime.UtcNow;
@@ -217,13 +240,23 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
         _speakerChunks++;
 
-        byte[] converted = ConvertAudio(
+        byte[] converted = AudioProcessing.ConvertLoopbackToTarget(
             e.Buffer, e.BytesRecorded, _loopbackFormat!, TargetFormat);
         if (converted.Length == 0) return;
 
-        // 無音スキップ
-        short peak = CalcPeak(converted, converted.Length);
-        if (peak < SilenceThreshold) return;
+        // 無音スキップ: ピーク + エネルギー の二重判定
+        short peak = AudioProcessing.CalcPeak(converted, converted.Length);
+        float rms = AudioProcessing.CalcRms(converted, converted.Length);
+
+        // エネルギー履歴を更新
+        lock (_spkBufLock)
+        {
+            _spkEnergyHistory.Enqueue(rms);
+            while (_spkEnergyHistory.Count > EnergyHistorySize)
+                _spkEnergyHistory.Dequeue();
+        }
+
+        if (peak < SilenceThreshold && rms < VadEnergyThreshold) return;
 
         // VAD: 音声がある時刻を記録
         _spkLastVoiceTime = DateTime.UtcNow;
@@ -245,15 +278,18 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     //  VAD ベース認識処理ループ (バックグラウンドスレッド)
     // ────────────────────────────────────────────────
     private void MicProcessLoop() => VadProcessLoop("自分", _micBufLock, _micBuffer,
-        () => _micLastVoiceTime, () => _micLastPrompt, p => _micLastPrompt = p);
+        () => _micLastVoiceTime, () => _micLastPrompt, p => _micLastPrompt = p,
+        () => _micLastText, t => _micLastText = t, _micEnergyHistory);
 
     private void SpkProcessLoop() => VadProcessLoop("相手", _spkBufLock, _speakerBuffer,
-        () => _spkLastVoiceTime, () => _spkLastPrompt, p => _spkLastPrompt = p);
+        () => _spkLastVoiceTime, () => _spkLastPrompt, p => _spkLastPrompt = p,
+        () => _spkLastText, t => _spkLastText = t, _spkEnergyHistory);
 
     /// <summary>
     /// VAD ベースの認識ループ。
-    /// 発話→無音(800ms以上)を検知したとき、またはバッファが最大長(15秒)に
-    /// 達したときに Whisper で処理する。最小長(2秒)未満はスキップ。
+    /// 発話→無音(700ms以上)を検知したとき、またはバッファが最大長(12秒)に
+    /// 達したときに Whisper で処理する。最小長(1.2秒)未満はスキップ。
+    /// エネルギー履歴を参照してより精密な無音判定を行う。
     /// </summary>
     private void VadProcessLoop(
         string speaker,
@@ -261,7 +297,10 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         MemoryStream buffer,
         Func<DateTime> getLastVoiceTime,
         Func<string> getPrompt,
-        Action<string> setPrompt)
+        Action<string> setPrompt,
+        Func<string> getLastText,
+        Action<string> setLastText,
+        Queue<float> energyHistory)
     {
         int minBytes = (int)(TargetFormat.SampleRate * 2 * MinBufferSec);
         int maxBytes = (int)(TargetFormat.SampleRate * 2 * MaxBufferSec);
@@ -282,9 +321,16 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 bool silenceDetected = lastVoice != DateTime.MinValue && silenceMs >= SilenceTimeoutMs;
                 bool maxReached = buffer.Length >= maxBytes;
 
+                // エネルギー履歴で無音判定を補強
+                float avgEnergy = 0f;
+                if (energyHistory.Count > 0)
+                    avgEnergy = energyHistory.Average();
+                bool energySilence = avgEnergy < VadEnergyThreshold && energyHistory.Count >= 3;
+
                 // 通常: バッファ >= 最小長 かつ (無音検出 or 最大到達)
-                // 短い発話救済: バッファ < 最小長 でも長い無音が続けば処理
-                bool normalProcess = buffer.Length >= minBytes && (silenceDetected || maxReached);
+                // エネルギーベースは追加の無音判定
+                bool normalProcess = buffer.Length >= minBytes && 
+                    ((silenceDetected && energySilence) || silenceDetected || maxReached);
                 bool shortUtterance = buffer.Length > 0 && buffer.Length < minBytes
                                    && lastVoice != DateTime.MinValue && silenceMs >= LongSilenceMs;
 
@@ -298,9 +344,17 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             if (pcmData != null)
             {
                 string prompt = getPrompt();
-                string result = ProcessChunk(pcmData, speaker, prompt);
+                string lastText = getLastText();
+                string result = ProcessChunk(pcmData, speaker, prompt, lastText);
                 if (!string.IsNullOrEmpty(result))
-                    setPrompt(result);
+                {
+                    // Prompt を適切な長さに管理
+                    string newPrompt = prompt + result;
+                    if (newPrompt.Length > MaxPromptLength)
+                        newPrompt = newPrompt[^MaxPromptLength..];
+                    setPrompt(newPrompt);
+                    setLastText(result);
+                }
             }
         }
 
@@ -315,15 +369,16 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         if (remaining != null)
         {
             string prompt = getPrompt();
-            ProcessChunk(remaining, speaker, prompt);
+            string lastText = getLastText();
+            ProcessChunk(remaining, speaker, prompt, lastText);
         }
     }
 
     /// <summary>PCM 16bit チャンクを Whisper で認識する。認識テキストを返す。</summary>
-    private string ProcessChunk(byte[] pcm16, string speaker, string prompt)
+    private string ProcessChunk(byte[] pcm16, string speaker, string prompt, string lastText)
     {
         // バッファ全体の RMS エネルギーを確認—実質無音ならスキップ
-        float rms = CalcRms(pcm16, pcm16.Length);
+        float rms = AudioProcessing.CalcRms(pcm16, pcm16.Length);
         if (rms < MinRmsEnergy)
             return "";
 
@@ -347,7 +402,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 using var processor = builder.Build();
 
                 using var wavStream = new MemoryStream();
-                WriteWavPcm16(wavStream, pcm16, TargetFormat.SampleRate);
+                AudioProcessing.WriteWavPcm16(wavStream, pcm16, TargetFormat.SampleRate);
                 wavStream.Position = 0;
 
                 var task = Task.Run(async () =>
@@ -373,12 +428,21 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
             foreach (var (start, end, text) in results)
             {
-                sb.Append(text);
+                // ── ハルシネーションフィルター ──
+                string normalized = WhisperTextFilter.NormalizeText(text);
+                if (WhisperTextFilter.IsHallucination(normalized))
+                    continue;
+
+                // ── 重複テキスト検出 ──
+                if (WhisperTextFilter.IsDuplicate(normalized, lastText))
+                    continue;
+
+                sb.Append(normalized);
 
                 var entry = new TranscriptEntry(
                     Timestamp: DateTime.Now,
                     Speaker: speaker,
-                    Text: text,
+                    Text: normalized,
                     Duration: end - start);
 
                 lock (_lock)
@@ -387,6 +451,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 }
 
                 OnTranscribed?.Invoke(entry);
+                lastText = normalized;
             }
 
             return sb.ToString();
@@ -398,99 +463,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     }
 
     // ────────────────────────────────────────────────
-    //  音声変換ユーティリティ
+    //  音声変換ユーティリティ (共通関数へ委譲)
     // ────────────────────────────────────────────────
-    /// <summary>PCM 16bit/mono データを WAV ファイルとしてストリームに書き込む</summary>
-    private static void WriteWavPcm16(Stream stream, byte[] pcm16, int sampleRate)
-    {
-        using var w = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
-
-        int channels = 1;
-        int bitsPerSample = 16;
-        int byteRate = sampleRate * channels * bitsPerSample / 8;
-        int blockAlign = channels * bitsPerSample / 8;
-        int dataSize = pcm16.Length;
-
-        // RIFF header
-        w.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"));
-        w.Write(36 + dataSize);
-        w.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"));
-
-        // fmt chunk (PCM)
-        w.Write(System.Text.Encoding.ASCII.GetBytes("fmt "));
-        w.Write(16);                       // chunk size
-        w.Write((short)1);                 // audio format: PCM
-        w.Write((short)channels);
-        w.Write(sampleRate);
-        w.Write(byteRate);
-        w.Write((short)blockAlign);
-        w.Write((short)bitsPerSample);
-
-        // data chunk
-        w.Write(System.Text.Encoding.ASCII.GetBytes("data"));
-        w.Write(dataSize);
-        w.Write(pcm16);
-    }
 
     private static byte[] ConvertAudio(
         byte[] source, int length, WaveFormat sourceFormat, WaveFormat targetFormat)
-    {
-        int bytesPerSample = sourceFormat.BitsPerSample / 8;
-        int channels = sourceFormat.Channels;
-        int sampleCount = length / (bytesPerSample * channels);
-
-        int ratio = sourceFormat.SampleRate / targetFormat.SampleRate;
-        if (ratio < 1) ratio = 1;
-
-        int outputSamples = sampleCount / ratio;
-        if (outputSamples == 0) return Array.Empty<byte>();
-
-        byte[] result = new byte[outputSamples * 2];
-
-        for (int i = 0; i < outputSamples; i++)
-        {
-            int srcIndex = i * ratio;
-            float sum = 0f;
-            for (int ch = 0; ch < channels; ch++)
-            {
-                int offset = (srcIndex * channels + ch) * bytesPerSample;
-                if (offset + 4 <= length)
-                    sum += BitConverter.ToSingle(source, offset);
-            }
-            float mono = Math.Clamp(sum / channels, -1.0f, 1.0f);
-            short pcm = (short)(mono * 32767);
-            result[i * 2] = (byte)(pcm & 0xFF);
-            result[i * 2 + 1] = (byte)((pcm >> 8) & 0xFF);
-        }
-
-        return result;
-    }
-
-    private static short CalcPeak(byte[] buffer, int length)
-    {
-        short max = 0;
-        for (int j = 0; j + 1 < length; j += 2)
-        {
-            short s = BitConverter.ToInt16(buffer, j);
-            short abs = Math.Abs(s);
-            if (abs > max) max = abs;
-        }
-        return max;
-    }
-
-    /// <summary>PCM 16bit バッファの RMS (二乗平均平方根) を計算する</summary>
-    private static float CalcRms(byte[] buffer, int length)
-    {
-        long sumSq = 0;
-        int count = 0;
-        for (int j = 0; j + 1 < length; j += 2)
-        {
-            short s = BitConverter.ToInt16(buffer, j);
-            sumSq += (long)s * s;
-            count++;
-        }
-        return count > 0 ? MathF.Sqrt((float)sumSq / count) : 0f;
-    }
+        => AudioProcessing.ConvertLoopbackToTarget(source, length, sourceFormat, targetFormat);
 
     // ────────────────────────────────────────────────
     //  停止

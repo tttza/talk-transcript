@@ -122,7 +122,7 @@ public sealed class SpeakerTranscriber : IDisposable
 
         try
         {
-            byte[] converted = ConvertAudio(
+            byte[] converted = AudioProcessing.ConvertLoopbackToTarget(
                 e.Buffer, e.BytesRecorded, _captureFormat!, TargetFormat);
 
             if (converted.Length > 0)
@@ -149,51 +149,11 @@ public sealed class SpeakerTranscriber : IDisposable
 
     /// <summary>
     /// ループバック音声を認識エンジンが受け付けるフォーマット (16 kHz / 16 bit / mono) に変換する。
-    /// WASAPI は通常 IEEE Float 32bit で返すため、手動で PCM 16bit に変換し、
-    /// サンプルレートを間引きで変換する。
+    /// WASAPI は通常 IEEE Float 32bit で返すため、リニア補間で高品質にリサンプリングする。
     /// </summary>
     private static byte[] ConvertAudio(
         byte[] source, int length, WaveFormat sourceFormat, WaveFormat targetFormat)
-    {
-        int bytesPerSample = sourceFormat.BitsPerSample / 8;
-        int channels = sourceFormat.Channels;
-        int sampleCount = length / (bytesPerSample * channels);
-
-        // サンプルレート変換比率 (例: 48000 / 16000 = 3)
-        int ratio = sourceFormat.SampleRate / targetFormat.SampleRate;
-        if (ratio < 1) ratio = 1;
-
-        // 出力サンプル数 = 入力サンプル数 / 比率
-        int outputSamples = sampleCount / ratio;
-        if (outputSamples == 0) return Array.Empty<byte>();
-
-        byte[] result = new byte[outputSamples * 2]; // 16bit = 2 bytes per sample
-
-        for (int i = 0; i < outputSamples; i++)
-        {
-            int srcIndex = i * ratio;  // 元のサンプルインデックス
-
-            // 全チャンネルの平均 → モノラル
-            float sum = 0f;
-            for (int ch = 0; ch < channels; ch++)
-            {
-                int offset = (srcIndex * channels + ch) * bytesPerSample;
-                if (offset + 4 <= length)
-                {
-                    sum += BitConverter.ToSingle(source, offset);
-                }
-            }
-
-            float mono = sum / channels;
-            mono = Math.Clamp(mono, -1.0f, 1.0f);
-
-            short pcm = (short)(mono * 32767);
-            result[i * 2] = (byte)(pcm & 0xFF);
-            result[i * 2 + 1] = (byte)((pcm >> 8) & 0xFF);
-        }
-
-        return result;
-    }
+        => AudioProcessing.ConvertLoopbackToTarget(source, length, sourceFormat, targetFormat);
 
     /// <summary>
     /// 音声が認識されたときの処理。
