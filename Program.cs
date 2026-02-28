@@ -156,7 +156,16 @@ else
 Directory.CreateDirectory(outputDir);
 var fileName = $"transcript_{DateTime.Now:yyyyMMdd_HHmmss}.txt";
 var filePath = Path.Combine(outputDir, fileName);
-using var writer = new TranscriptWriter(filePath);
+
+// txt 出力が有効かどうか判定 (フォーマット未設定 or Text を含む場合に出力)
+bool hasFormatConfig = extraFormats.Count > 0;
+bool outputText = !hasFormatConfig || extraFormats.Contains(OutputFormat.Text);
+TranscriptWriter? writer = outputText ? new TranscriptWriter(filePath) : null;
+
+// JSON 逐次書き出し (クラッシュ時にデータを失わない)
+bool outputJson = extraFormats.Contains(OutputFormat.Json);
+string jsonPath = Path.Combine(outputDir, Path.GetFileNameWithoutExtension(fileName) + ".json");
+IncrementalJsonWriter? jsonWriter = outputJson ? new IncrementalJsonWriter(jsonPath) : null;
 
 var overallStart = DateTime.Now;
 int totalMicCount = 0;
@@ -175,7 +184,8 @@ void EmergencyCleanup()
     if (Interlocked.Exchange(ref _cleanedUp, 1) != 0) return;
     try { lastTranscriber?.Stop(); } catch { }
     try { lastTranscriber?.Dispose(); } catch { }
-    try { writer.Close(); } catch { }
+    try { writer?.Close(); } catch { }
+    try { jsonWriter?.Dispose(); } catch { } // NDJSON のまま保存 (クラッシュリカバリ用)
 }
 AppDomain.CurrentDomain.ProcessExit += (_, _) => EmergencyCleanup();
 Console.CancelKeyPress += (_, e) =>
@@ -239,6 +249,17 @@ while (!quit)
     lastTranscriber = callTranscriber;
     int sessionMic = 0, sessionSpk = 0;
 
+    // ── ストリーミング録音 (後処理不要時はメモリに蓄積せずディスクに直接書き出す) ──
+    if (settings.SaveRecording && !canPostProcess)
+    {
+        string dir = Path.GetDirectoryName(filePath) ?? ".";
+        string baseName = Path.GetFileNameWithoutExtension(filePath);
+        string micPath = Path.Combine(dir, $"{baseName}_mic.wav");
+        string? spkPath = settings.SaveMicOnly ? null : Path.Combine(dir, $"{baseName}_speaker.wav");
+        callTranscriber.StartStreamingRecording(micPath, spkPath);
+        AppLogger.Info($"録音ストリーミング開始: {micPath}");
+    }
+
     // ── SpectreUI セットアップ ──
     var ui = new SpectreUI();
     ui.Configure(engineName, useGpu, micDevice.FriendlyName, speakerDevice.FriendlyName,
@@ -247,7 +268,8 @@ while (!quit)
     void OnTranscribed(TranscriptEntry entry)
     {
         ui.AddEntry(entry);
-        writer.Append(entry);
+        writer?.Append(entry);
+        jsonWriter?.Append(entry);
         allEntries.Add(entry);
         if (entry.Speaker == "自分") { sessionMic++; totalMicCount++; }
         else { sessionSpk++; totalSpkCount++; }
@@ -267,7 +289,8 @@ while (!quit)
             Text: "ブックマーク",
             IsBookmark: true);
         ui.AddEntry(bookmark);
-        writer.Append(bookmark);
+        writer?.Append(bookmark);
+        jsonWriter?.Append(bookmark);
         AppLogger.Info("ブックマークを追加しました");
     };
 
@@ -375,14 +398,26 @@ while (!quit)
 }
 
 // ── 最終出力 ──
-writer.Close();
-SpectreUI.PrintSummary(filePath, totalMicCount, totalSpkCount, DateTime.Now - overallStart);
+writer?.Close();
+writer?.Dispose();
+
+// JSON 逐次書き出しを完全な JSON に仕上げる
+var sortedEntries = allEntries.OrderBy(e => e.Timestamp).ToList();
+if (jsonWriter != null)
+{
+    jsonWriter.Close(sortedEntries, overallStart, DateTime.Now - overallStart, engineName, language);
+    jsonWriter.Dispose();
+    AnsiConsole.MarkupLine($"  [green]✓[/] JSON 出力: [white]{Markup.Escape(jsonPath)}[/]");
+}
+
+SpectreUI.PrintSummary(outputText ? filePath : null, totalMicCount, totalSpkCount, DateTime.Now - overallStart);
 
 // ── 追加フォーマットでエクスポート (#1) ──
-if (extraFormats.Count > 0)
+// JSON は IncrementalJsonWriter で既に出力済みなので除外
+var remainingFormats = extraFormats.Where(f => f != OutputFormat.Json && f != OutputFormat.Text).ToList();
+if (remainingFormats.Count > 0)
 {
-    var sortedEntries = allEntries.OrderBy(e => e.Timestamp).ToList();
-    var exported = TranscriptExporter.Export(filePath, sortedEntries, extraFormats,
+    var exported = TranscriptExporter.Export(filePath, sortedEntries, remainingFormats,
         overallStart, DateTime.Now - overallStart, engineName, language);
     foreach (var ep in exported)
     {
@@ -399,9 +434,9 @@ AppLogger.Close();
 // SelectEngineMenu は EngineSelector.SelectEngine() に移行済み
 
 void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
-                       TranscriptWriter w, string fp, DateTime callStart, string lang)
+                       TranscriptWriter? w, string fp, DateTime callStart, string lang)
 {
-    // ── 録音保存 (ストリーミング方式: byte[] にせずチャンクを順次書き出す) ──
+    // ── 録音保存 ──
     if (settings.SaveRecording)
     {
         SaveRecordingToWav(transcriber, fp);
@@ -411,6 +446,12 @@ void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
         ? null
         : (ModelManager.GetWhisperModelPath("base") ?? ModelManager.GetWhisperModelPath("tiny"));
     bool hasRecording = transcriber.MicRecordingLength > 0 || transcriber.SpeakerRecordingLength > 0;
+
+    // 後処理が不要な場合、録音バッファを即解放してメモリを回収
+    if (whisperPostModelPath == null && settings.SaveRecording)
+    {
+        transcriber.ClearRecordings();
+    }
 
     if (whisperPostModelPath != null && hasRecording)
     {
@@ -433,11 +474,14 @@ void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
                 whisperPostModelPath, micPcm, spkPcm, callStart, useGpu, lang, settings.MaxCpuThreads).GetAwaiter().GetResult();
             if (whisperEntries.Count > 0)
             {
-                w.Close();
-                w.Dispose();
-                using var ww = new TranscriptWriter(fp);
-                foreach (var entry in whisperEntries) ww.Append(entry);
-                ww.Close();
+                if (w != null)
+                {
+                    w.Close();
+                    w.Dispose();
+                    using var ww = new TranscriptWriter(fp);
+                    foreach (var entry in whisperEntries) ww.Append(entry);
+                    ww.Close();
+                }
                 AnsiConsole.MarkupLine("  [green]Whisper 後処理で更新しました。[/]");
                 return;
             }
@@ -455,28 +499,46 @@ void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
 }
 
 /// <summary>
-/// 録音データを WAV ファイルとして保存する (ストリーミング方式)。
-/// RecordingBuffer のチャンクを順次書き出すため、全体を byte[] にしない。
+/// 録音データを WAV ファイルとして保存する。
+/// ストリーミングモードの場合はファイルを確定するだけ。
+/// メモリモードの場合はチャンクを順次書き出す。
 /// </summary>
 void SaveRecordingToWav(ICallTranscriber transcriber, string transcriptPath)
 {
-    if (transcriber.MicRecordingLength == 0 && transcriber.SpeakerRecordingLength == 0) return;
+    string recDir = Path.GetDirectoryName(transcriptPath) ?? ".";
+    string recBaseName = Path.GetFileNameWithoutExtension(transcriptPath);
 
-    string dir = Path.GetDirectoryName(transcriptPath) ?? ".";
-    string baseName = Path.GetFileNameWithoutExtension(transcriptPath);
+    // ストリーミング録音の場合: ファイルを確定して完了
+    if (transcriber.IsStreamingRecording)
+    {
+        transcriber.StopStreamingRecording();
+
+        string micPath = Path.Combine(recDir, $"{recBaseName}_mic.wav");
+        if (File.Exists(micPath))
+            AnsiConsole.MarkupLine($"  [green]✓[/] マイク録音: [white]{Markup.Escape(micPath)}[/]");
+        if (!settings.SaveMicOnly)
+        {
+            string spkPath = Path.Combine(recDir, $"{recBaseName}_speaker.wav");
+            if (File.Exists(spkPath))
+                AnsiConsole.MarkupLine($"  [green]✓[/] スピーカー録音: [white]{Markup.Escape(spkPath)}[/]");
+        }
+        return;
+    }
+
+    if (transcriber.MicRecordingLength == 0 && transcriber.SpeakerRecordingLength == 0) return;
 
     try
     {
         if (transcriber.MicRecordingLength > 0)
         {
-            string micPath = Path.Combine(dir, $"{baseName}_mic.wav");
+            string micPath = Path.Combine(recDir, $"{recBaseName}_mic.wav");
             transcriber.SaveMicRecordingAsWav(micPath);
             AnsiConsole.MarkupLine($"  [green]✓[/] マイク録音: [white]{Markup.Escape(micPath)}[/]");
         }
 
         if (!settings.SaveMicOnly && transcriber.SpeakerRecordingLength > 0)
         {
-            string spkPath = Path.Combine(dir, $"{baseName}_speaker.wav");
+            string spkPath = Path.Combine(recDir, $"{recBaseName}_speaker.wav");
             transcriber.SaveSpeakerRecordingAsWav(spkPath);
             AnsiConsole.MarkupLine($"  [green]✓[/] スピーカー録音: [white]{Markup.Escape(spkPath)}[/]");
         }

@@ -53,7 +53,7 @@ public class AppSettings
     /// </summary>
     public string ProcessPriority { get; set; } = "Normal";
 
-    /// <summary>追加の出力フォーマット (テキスト出力は常に行われる)</summary>
+    /// <summary>出力フォーマット (未設定の場合はテキスト出力のみ)</summary>
     [JsonConverter(typeof(OutputFormatsConverter))]
     public List<OutputFormat>? OutputFormats { get; set; }
 

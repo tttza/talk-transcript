@@ -643,6 +643,26 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
     public void SaveSpeakerRecordingAsWav(string path) => _speakerRecording.SaveAsWav(path);
 
+    public void ClearRecordings()
+    {
+        _micRecording.Clear();
+        _speakerRecording.Clear();
+    }
+
+    public void StartStreamingRecording(string? micWavPath, string? spkWavPath)
+    {
+        if (micWavPath != null) _micRecording.StartStreaming(micWavPath);
+        if (spkWavPath != null) _speakerRecording.StartStreaming(spkWavPath);
+    }
+
+    public void StopStreamingRecording()
+    {
+        _micRecording.StopStreaming();
+        _speakerRecording.StopStreaming();
+    }
+
+    public bool IsStreamingRecording => _micRecording.IsStreaming || _speakerRecording.IsStreaming;
+
     public long MicRecordingLength => _micRecording.Length;
 
     public long SpeakerRecordingLength => _speakerRecording.Length;

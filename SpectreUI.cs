@@ -389,10 +389,11 @@ internal sealed class SpectreUI
     }
 
     /// <summary>最終サマリーを表示する</summary>
-    public static void PrintSummary(string filePath, int micCount, int spkCount, TimeSpan elapsed)
+    public static void PrintSummary(string? filePath, int micCount, int spkCount, TimeSpan elapsed)
     {
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine($"  [green]✓[/] 保存先: [white]{Markup.Escape(filePath)}[/]");
+        if (filePath != null)
+            AnsiConsole.MarkupLine($"  [green]✓[/] 保存先: [white]{Markup.Escape(filePath)}[/]");
         AnsiConsole.MarkupLine($"  [dim]合計: 自分 {micCount}件 / 相手 {spkCount}件 / 経過 {elapsed:hh\\:mm\\:ss}[/]");
         AnsiConsole.WriteLine();
     }

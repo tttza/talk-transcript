@@ -1,15 +1,24 @@
 namespace TalkTranscript.Audio;
 
 /// <summary>
-/// チャンク分割方式の録音バッファ (メモリ上のみ / ディスク書き出しなし)。
+/// チャンク分割方式の録音バッファ。
 ///
-/// MemoryStream の倍々確保 + ToArray コピー問題を解消するため、
-/// 固定サイズ (64KB) のチャンクを List で管理する。
+/// 2 つの動作モードを持つ:
 ///
-/// - <see cref="Write"/>: チャンク単位でメモリに蓄積 (LOH 断片化を抑制)
-/// - <see cref="SaveAsWav"/>: チャンクを順次ファイルに書き出し (全体を byte[] にしない)
-/// - <see cref="ToArray"/>: Whisper 後処理用に全体を byte[] に結合 (一時的にメモリ消費)
-/// - <see cref="Dispose"/>: 全チャンク参照をクリアし GC 回収可能にする
+/// <b>メモリモード (既定)</b>:
+/// 固定サイズ (64KB) のチャンクを List で管理し、メモリに蓄積する。
+/// Whisper 後処理で ToArray() が必要な場合に使用。
+///
+/// <b>ストリーミングモード</b>:
+/// <see cref="StartStreaming"/> を呼ぶと WAV ファイルを開き、
+/// 以降の Write() はメモリに蓄積せず直接ディスクに書き出す。
+/// 長時間録音でもメモリ消費を抑制できる。
+///
+/// - <see cref="Write"/>: モードに応じてメモリまたはディスクに書き込む
+/// - <see cref="SaveAsWav"/>: メモリモード時のみチャンクをファイルに書き出す
+/// - <see cref="ToArray"/>: Whisper 後処理用に全体を byte[] に結合 (メモリモードのみ)
+/// - <see cref="StopStreaming"/>: WAV ヘッダーを更新してファイルを閉じる
+/// - <see cref="Dispose"/>: 全リソースを解放する
 ///
 /// 無効状態 (enabled=false) では全操作が no-op となる。
 /// スレッドセーフ (内部ロック)。
@@ -25,6 +34,11 @@ internal sealed class RecordingBuffer : IDisposable
     private long _totalBytes;
     private bool _disposed;
 
+    // ── ストリーミングモード ──
+    private FileStream? _streamingFile;
+    private string? _streamingPath;
+    private bool _streaming;
+
     /// <summary>書き込み済みバイト数</summary>
     public long Length
     {
@@ -33,6 +47,12 @@ internal sealed class RecordingBuffer : IDisposable
 
     /// <summary>録音が有効かどうか</summary>
     public bool IsEnabled => _chunks != null;
+
+    /// <summary>ストリーミングモードが有効かどうか</summary>
+    public bool IsStreaming { get { lock (_lock) return _streaming; } }
+
+    /// <summary>ストリーミング先ファイルパス (ストリーミング中のみ非 null)</summary>
+    public string? StreamingPath { get { lock (_lock) return _streamingPath; } }
 
     /// <param name="enabled">true で録音バッファを有効化</param>
     /// <param name="maxBytes">最大バイト数 (0 = 空きメモリから自動計算, 超過分は無視)</param>
@@ -50,8 +70,8 @@ internal sealed class RecordingBuffer : IDisposable
 
     /// <summary>
     /// オーディオデータを書き込む。
-    /// 64KB 固定チャンクに分割して蓄積するため、
-    /// MemoryStream のような倍々確保が発生しない。
+    /// ストリーミングモードではディスクに直接書き出し、
+    /// メモリモードでは 64KB 固定チャンクに分割して蓄積する。
     /// </summary>
     public void Write(byte[] buffer, int offset, int count)
     {
@@ -63,36 +83,120 @@ internal sealed class RecordingBuffer : IDisposable
 
             while (remaining > 0 && _totalBytes < _maxBytes)
             {
-                // 末尾チャンクに空きがない場合は新規チャンク追加
-                if (_chunks.Count == 0 || _tailOffset >= ChunkSize)
-                {
-                    _chunks.Add(new byte[ChunkSize]);
-                    _tailOffset = 0;
-                }
-
-                int space = ChunkSize - _tailOffset;
                 int maxWrite = (int)Math.Min(remaining, _maxBytes - _totalBytes);
-                int toWrite = Math.Min(space, maxWrite);
 
-                Buffer.BlockCopy(buffer, srcOffset, _chunks[^1], _tailOffset, toWrite);
-                _tailOffset += toWrite;
-                _totalBytes += toWrite;
-                srcOffset += toWrite;
-                remaining -= toWrite;
+                if (_streaming && _streamingFile != null)
+                {
+                    // ストリーミングモード: ディスクに直接書き出す (メモリ上限を適用しない)
+                    int toWrite = remaining;
+                    _streamingFile.Write(buffer, srcOffset, toWrite);
+                    _totalBytes += toWrite;
+                    srcOffset += toWrite;
+                    remaining = 0;
+                    break;
+                }
+                else
+                {
+                    // メモリモード: チャンクに蓄積
+                    if (_chunks.Count == 0 || _tailOffset >= ChunkSize)
+                    {
+                        _chunks.Add(new byte[ChunkSize]);
+                        _tailOffset = 0;
+                    }
+
+                    int space = ChunkSize - _tailOffset;
+                    int toWrite = Math.Min(space, maxWrite);
+
+                    Buffer.BlockCopy(buffer, srcOffset, _chunks[^1], _tailOffset, toWrite);
+                    _tailOffset += toWrite;
+                    _totalBytes += toWrite;
+                    srcOffset += toWrite;
+                    remaining -= toWrite;
+                }
             }
         }
     }
 
     /// <summary>
+    /// ストリーミングモードを開始する。
+    /// WAV ファイルを開き、以降の Write() はメモリに蓄積せずディスクに直接書き出す。
+    /// 既にメモリに蓄積されたチャンクがあればディスクにフラッシュして解放する。
+    /// </summary>
+    /// <param name="wavPath">出力 WAV ファイルパス</param>
+    /// <param name="sampleRate">サンプルレート (既定: 16000)</param>
+    public void StartStreaming(string wavPath, int sampleRate = 16000)
+    {
+        if (_chunks == null || _disposed) return;
+        lock (_lock)
+        {
+            if (_streaming) return;
+
+            Directory.CreateDirectory(Path.GetDirectoryName(wavPath)!);
+            _streamingFile = new FileStream(wavPath, FileMode.Create, FileAccess.Write, FileShare.Read, 65536);
+            _streamingPath = wavPath;
+            _streaming = true;
+
+            // プレースホルダーサイズで WAV ヘッダーを書き込む (後で更新)
+            WriteWavPcm16Header(_streamingFile, 0, sampleRate);
+
+            // 既存のメモリチャンクをディスクにフラッシュ
+            for (int i = 0; i < _chunks.Count; i++)
+            {
+                int writeLen = (i < _chunks.Count - 1) ? ChunkSize : _tailOffset;
+                _streamingFile.Write(_chunks[i], 0, writeLen);
+            }
+            _chunks.Clear();
+            _chunks.TrimExcess();
+            _tailOffset = 0;
+            // _totalBytes はそのまま維持 (ヘッダー更新時に必要)
+        }
+    }
+
+    /// <summary>
+    /// ストリーミングモードを停止する。
+    /// WAV ヘッダーのデータサイズを正しい値に更新してファイルを閉じる。
+    /// </summary>
+    public void StopStreaming()
+    {
+        if (!_streaming || _streamingFile == null) return;
+        lock (_lock)
+        {
+            if (!_streaming || _streamingFile == null) return;
+
+            if (_totalBytes > 0 && _totalBytes <= int.MaxValue)
+            {
+                int dataSize = (int)_totalBytes;
+                _streamingFile.Flush();
+
+                // RIFF チャンクサイズ (オフセット 4): 36 + dataSize
+                _streamingFile.Seek(4, SeekOrigin.Begin);
+                var riffSize = BitConverter.GetBytes(36 + dataSize);
+                _streamingFile.Write(riffSize, 0, 4);
+
+                // data チャンクサイズ (オフセット 40): dataSize
+                _streamingFile.Seek(40, SeekOrigin.Begin);
+                var dataSizeBytes = BitConverter.GetBytes(dataSize);
+                _streamingFile.Write(dataSizeBytes, 0, 4);
+            }
+
+            _streamingFile.Flush();
+            _streamingFile.Dispose();
+            _streamingFile = null;
+            _streaming = false;
+        }
+    }
+
+    /// <summary>
     /// 録音データ全体をバイト配列として返す (Whisper 後処理用)。
-    /// 一時的にメモリを消費するが、呼び出し側で使用後すぐに GC 回収される。
+    /// メモリモードでのみ使用可能。ストリーミングモードでは空配列を返す。
     /// </summary>
     public byte[] ToArray()
     {
         if (_chunks == null || _disposed) return Array.Empty<byte>();
         lock (_lock)
         {
-            if (_totalBytes == 0 || _totalBytes > int.MaxValue)
+            // ストリーミング済み or データなし → メモリ上にデータがない
+            if (_totalBytes == 0 || _totalBytes > int.MaxValue || _chunks.Count == 0)
                 return Array.Empty<byte>();
 
             int total = (int)_totalBytes;
@@ -110,8 +214,9 @@ internal sealed class RecordingBuffer : IDisposable
     }
 
     /// <summary>
-    /// 録音データを WAV ファイルとして保存する。
+    /// 録音データを WAV ファイルとして保存する (メモリモード用)。
     /// チャンクを順次書き出すため、全体を byte[] に結合しない。
+    /// ストリーミングモードでは既にディスクに書き出し済みのため no-op。
     /// </summary>
     /// <param name="wavPath">出力 WAV ファイルパス</param>
     /// <param name="sampleRate">サンプルレート (既定: 16000)</param>
@@ -120,6 +225,9 @@ internal sealed class RecordingBuffer : IDisposable
         if (_chunks == null || _disposed) return;
         lock (_lock)
         {
+            // ストリーミング中 or 完了済みの場合は既にディスク上にある
+            if (_streaming || _streamingPath != null) return;
+
             if (_totalBytes == 0) return;
 
             // WAV (RIFF) フォーマットはデータサイズが 32bit のため 2GB 超を書けない
@@ -168,13 +276,32 @@ internal sealed class RecordingBuffer : IDisposable
     }
 
     /// <summary>
-    /// 全チャンクの参照をクリアし、GC 回収可能にする。
-    /// ディスクに書き出していないため、ファイル削除は不要。
+    /// チャンクデータをクリアしてメモリを解放する (Dispose はしない)。
+    /// SaveAsWav() 後に後処理が不要な場合、早期にメモリを回収するために使用する。
+    /// </summary>
+    public void Clear()
+    {
+        if (_chunks == null || _disposed) return;
+        lock (_lock)
+        {
+            _chunks.Clear();
+            _chunks.TrimExcess();
+            _totalBytes = 0;
+            _tailOffset = 0;
+        }
+    }
+
+    /// <summary>
+    /// 全リソースを解放する。
+    /// ストリーミング中の場合はファイルを確定してから閉じる。
     /// </summary>
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
+
+        // ストリーミング中のファイルを確定して閉じる
+        try { StopStreaming(); } catch { }
 
         if (_chunks != null)
         {

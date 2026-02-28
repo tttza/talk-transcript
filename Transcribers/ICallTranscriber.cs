@@ -41,6 +41,20 @@ public interface ICallTranscriber : IDisposable
     /// <summary>スピーカー録音を WAV ファイルとして保存する (ストリーミング方式)</summary>
     void SaveSpeakerRecordingAsWav(string path);
 
+    /// <summary>録音バッファをクリアしてメモリを早期に解放する (後処理不要時に呼ぶ)</summary>
+    void ClearRecordings();
+
+    /// <summary>ストリーミング録音を開始する (録音データをメモリに蓄積せずディスクに直接書き出す)</summary>
+    /// <param name="micWavPath">マイク録音の WAV パス (null で無効)</param>
+    /// <param name="spkWavPath">スピーカー録音の WAV パス (null で無効)</param>
+    void StartStreamingRecording(string? micWavPath, string? spkWavPath);
+
+    /// <summary>ストリーミング録音を停止し WAV ヘッダーを確定する</summary>
+    void StopStreamingRecording();
+
+    /// <summary>ストリーミング録音が有効かどうか</summary>
+    bool IsStreamingRecording { get; }
+
     /// <summary>マイク録音のバイト数</summary>
     long MicRecordingLength { get; }
 
