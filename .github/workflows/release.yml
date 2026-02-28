@@ -13,7 +13,11 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        rid: [win-x64, win-arm64]
+        include:
+          - rid: win-x64
+            platform: x64
+          - rid: win-arm64
+            platform: arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +31,7 @@ jobs:
         run: dotnet restore TalkTranscript.csproj
 
       - name: Build
-        run: dotnet publish TalkTranscript.csproj -c Release -r ${{ matrix.rid }} --self-contained -o publish
+        run: dotnet publish TalkTranscript.csproj -c Release -r ${{ matrix.rid }} -p:PlatformTarget=${{ matrix.platform }} --self-contained -o publish
 
       - name: Create ZIP
         run: Compress-Archive -Path publish\* -DestinationPath TalkTranscript-${{ github.ref_name }}-${{ matrix.rid }}.zip
