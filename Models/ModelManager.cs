@@ -5,12 +5,12 @@ namespace TalkTranscript.Models;
 
 /// <summary>
 /// Vosk / Whisper の音声認識モデルのダウンロードと管理を行う。
-/// モデルは %APPDATA%\TalkTranscript\Models\ に保存する。
+/// モデルは %LOCALAPPDATA%\TalkTranscript\Models\ に保存する。
 /// </summary>
 public static class ModelManager
 {
     private static readonly string ModelsDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "TalkTranscript", "Models");
 
     // ── Vosk ──
