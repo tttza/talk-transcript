@@ -334,6 +334,8 @@ while (!quit)
         case "config":
             callTranscriber.Dispose();
             ConfigMenu.Show(hwProfile);
+            // 設定画面の残りを消してから録音セッションを再開
+            Console.Clear();
             // 設定を再読み込み
             settings = AppSettings.Load();
             // --engine 引数が指定されていればそちらを優先

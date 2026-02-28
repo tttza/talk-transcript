@@ -45,7 +45,7 @@ public static class ModelManager
         string modelPath = Path.Combine(ModelsDir, VoskModelName);
         if (Directory.Exists(modelPath))
         {
-            Console.WriteLine($"[モデル] Vosk モデル: {modelPath} (キャッシュ済み)");
+            Logging.AppLogger.Info($"Vosk モデル: {modelPath} (キャッシュ済み)");
             return modelPath;
         }
 
@@ -112,7 +112,7 @@ public static class ModelManager
         string modelPath = Path.Combine(ModelsDir, fileName);
         if (File.Exists(modelPath))
         {
-            Console.WriteLine($"[モデル] Whisper {size} モデル: {modelPath} (キャッシュ済み)");
+            Logging.AppLogger.Info($"Whisper {size} モデル: {modelPath} (キャッシュ済み)");
             return modelPath;
         }
 

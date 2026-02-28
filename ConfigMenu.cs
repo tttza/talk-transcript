@@ -44,27 +44,10 @@ internal static class ConfigMenu
             // 現在の設定を表示
             PrintCurrentSettings(settings, hwProfile);
 
-            // 番号付きメニューを表示
-            AnsiConsole.MarkupLine("[cyan]変更する項目を選択してください (番号を入力 / 0 で戻る):[/]");
-            AnsiConsole.WriteLine();
-            for (int i = 0; i < menuItems.Length; i++)
-            {
-                AnsiConsole.MarkupLine($"  [white]{i + 1}.[/] {menuItems[i].Label}");
-            }
-            AnsiConsole.MarkupLine($"  [dim]0. ← 戻る[/]");
+            AnsiConsole.MarkupLine("[cyan]変更する項目を選択してください (↑↓ / 番号 / Enter):[/]");
             AnsiConsole.WriteLine();
 
-            var input = AnsiConsole.Prompt(
-                new TextPrompt<string>("  [cyan]>[/]")
-                    .ValidationErrorMessage("[red]  有効な番号を入力してください[/]")
-                    .Validate(v =>
-                    {
-                        if (int.TryParse(v.Trim(), out int n) && n >= 0 && n <= menuItems.Length)
-                            return ValidationResult.Success();
-                        return ValidationResult.Error();
-                    }));
-
-            int selected = int.Parse(input.Trim());
+            int selected = ShowInteractiveMenu(menuItems);
             AnsiConsole.WriteLine();
 
             if (selected == 0)
@@ -72,6 +55,135 @@ internal static class ConfigMenu
 
             menuItems[selected - 1].Action?.Invoke();
         }
+    }
+
+    // ── ANSI エスケープ定数 ──
+    private const string AnsiReset     = "\x1b[0m";
+    private const string AnsiBoldCyan  = "\x1b[1;36m";
+    private const string AnsiWhite     = "\x1b[37m";
+    private const string AnsiDim       = "\x1b[2m";
+    private const string AnsiClearLine = "\x1b[2K";
+
+    /// <summary>
+    /// 番号キーと矢印キーの両方で操作できるインタラクティブメニュー。
+    /// 戻り値: 1〜N (選択した項目), 0 = 戻る。
+    /// </summary>
+    private static int ShowInteractiveMenu((string Label, Action? Action)[] items)
+    {
+        // コンソール入力がリダイレクトされている場合はフォールバック
+        if (Console.IsInputRedirected)
+            return ShowFallbackMenu(items);
+
+        // カーソルを非表示にして描画のちらつきを抑制
+        Console.CursorVisible = false;
+
+        int cursor = 0; // 0..items.Length (items.Length = "戻る")
+        int count = items.Length + 1;
+        int lineCount = count; // 描画する行数
+
+        try
+        {
+            // 初回描画
+            WriteMenuLines(items, cursor);
+
+            while (true)
+            {
+                var key = Console.ReadKey(true);
+
+                // ── 数字キー (メインキーボード & テンキー) ──
+                int num = -1;
+                if (key.Key >= ConsoleKey.D0 && key.Key <= ConsoleKey.D9)
+                    num = key.Key - ConsoleKey.D0;
+                else if (key.Key >= ConsoleKey.NumPad0 && key.Key <= ConsoleKey.NumPad9)
+                    num = key.Key - ConsoleKey.NumPad0;
+
+                if (num == 0)
+                {
+                    MoveUpAndRewrite(items, items.Length, lineCount);
+                    return 0;
+                }
+                if (num >= 1 && num <= items.Length)
+                {
+                    MoveUpAndRewrite(items, num - 1, lineCount);
+                    return num;
+                }
+
+                // ── 矢印キー ──
+                bool moved = false;
+                if (key.Key == ConsoleKey.UpArrow)   { cursor = (cursor - 1 + count) % count; moved = true; }
+                if (key.Key == ConsoleKey.DownArrow) { cursor = (cursor + 1) % count; moved = true; }
+
+                if (moved)
+                    MoveUpAndRewrite(items, cursor, lineCount);
+
+                // ── Enter / Escape ──
+                if (key.Key == ConsoleKey.Enter)
+                    return cursor == items.Length ? 0 : cursor + 1;
+
+                if (key.Key == ConsoleKey.Escape)
+                {
+                    MoveUpAndRewrite(items, items.Length, lineCount);
+                    return 0;
+                }
+            }
+        }
+        finally
+        {
+            Console.CursorVisible = true;
+            Console.WriteLine(); // 最終行の後に改行を入れて次の出力が重ならないようにする
+        }
+    }
+
+    /// <summary>相対カーソル移動で描画開始位置に戻ってから再描画する。</summary>
+    private static void MoveUpAndRewrite((string Label, Action? Action)[] items, int cursor, int lineCount)
+    {
+        // カーソルを描画開始位置まで戻す (最終行は改行なしなので lineCount - 1 行上へ)
+        Console.Write($"\x1b[{lineCount - 1}A\r");
+        WriteMenuLines(items, cursor);
+    }
+
+    /// <summary>
+    /// メニュー項目を Console.Write で直接描画する。
+    /// 最終行は改行しない。
+    /// </summary>
+    private static void WriteMenuLines((string Label, Action? Action)[] items, int cursor)
+    {
+        var sb = new System.Text.StringBuilder();
+
+        for (int i = 0; i < items.Length; i++)
+        {
+            bool selected = (i == cursor);
+            string prefix = selected ? "❯" : " ";
+            string color  = selected ? AnsiBoldCyan : AnsiWhite;
+            sb.Append($"{AnsiClearLine}  {color}{prefix} {i + 1}. {items[i].Label}{AnsiReset}\n");
+        }
+
+        bool isBack = cursor == items.Length;
+        string backColor = isBack ? AnsiBoldCyan : AnsiDim;
+        string backPrefix = isBack ? "❯" : " ";
+        sb.Append($"{AnsiClearLine}  {backColor}{backPrefix} 0. ← 戻る{AnsiReset}");
+
+        Console.Write(sb.ToString());
+    }
+
+    /// <summary>入力リダイレクト時のフォールバックメニュー。</summary>
+    private static int ShowFallbackMenu((string Label, Action? Action)[] items)
+    {
+        for (int i = 0; i < items.Length; i++)
+            AnsiConsole.MarkupLine($"  [white]  {i + 1}. {items[i].Label}[/]");
+        AnsiConsole.MarkupLine($"  [dim]  0. ← 戻る[/]");
+        AnsiConsole.WriteLine();
+
+        var input = AnsiConsole.Prompt(
+            new TextPrompt<string>("  [cyan]>[/]")
+                .ValidationErrorMessage("[red]  有効な番号を入力してください[/]")
+                .Validate(v =>
+                {
+                    if (int.TryParse(v.Trim(), out int n) && n >= 0 && n <= items.Length)
+                        return ValidationResult.Success();
+                    return ValidationResult.Error();
+                }));
+        return int.Parse(input.Trim());
     }
 
     private static void PrintCurrentSettings(AppSettings settings, HardwareInfo.EnvironmentProfile hwProfile)

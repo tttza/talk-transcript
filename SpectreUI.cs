@@ -209,7 +209,7 @@ internal sealed class SpectreUI
             lock (_lock)
             {
                 int maxEntries;
-                try { maxEntries = Math.Max(3, Console.WindowHeight - 10); }
+                try { maxEntries = Math.Max(3, Console.WindowHeight - 7); }
                 catch { maxEntries = 20; }
                 int maxOffset = Math.Max(0, _entries.Count - maxEntries);
                 _scrollOffset = Math.Min(_scrollOffset + step, maxOffset);
@@ -230,7 +230,7 @@ internal sealed class SpectreUI
             lock (_lock)
             {
                 int maxEntries;
-                try { maxEntries = Math.Max(3, Console.WindowHeight - 10); }
+                try { maxEntries = Math.Max(3, Console.WindowHeight - 7); }
                 catch { maxEntries = 20; }
                 _scrollOffset = Math.Max(0, _entries.Count - maxEntries);
                 _lastScrollTime = DateTime.Now;
@@ -248,22 +248,21 @@ internal sealed class SpectreUI
         var elapsed = DateTime.Now - _startTime;
         var rows = new List<IRenderable>();
 
-        // ── ステータス行 ──
-        var statusParts = new List<string> { "[green]● 録音中[/]" };
+        // ── ステータス + 音量 (1行にまとめる) ──
+        var statusParts = new List<string> { "[green]●[/]" };
+        statusParts.Add($"{elapsed:hh\\:mm\\:ss}");
         if (_isTest)
-            statusParts.Add($"[magenta]テスト ({_testSeconds}秒)[/]");
-        statusParts.Add($"[dim]経過[/] {elapsed:hh\\:mm\\:ss}");
+            statusParts.Add($"[magenta]テスト({_testSeconds}秒)[/]");
+        statusParts.Add(BuildVolumeBar("🎤", _micVolume, "cyan"));
+        statusParts.Add(BuildVolumeBar("🔊", _speakerVolume, "yellow"));
         rows.Add(new Markup("  " + string.Join("  ", statusParts)));
-
-        // ── 音量メーター (#2) ──
-        rows.Add(new Markup("  " + BuildVolumeBar("🎤", _micVolume, "cyan") + "   " +
-                                   BuildVolumeBar("🔊", _speakerVolume, "yellow")));
 
         rows.Add(new Rule().RuleStyle("dim"));
 
         // ── 文字起こし結果 ──
         int maxEntries;
-        try { maxEntries = Math.Max(3, Console.WindowHeight - 10); }
+        // 固定行: バナー(2) + ステータス(1) + 区切り線(1) + フッター(3) = 7
+        try { maxEntries = Math.Max(3, Console.WindowHeight - 7); }
         catch { maxEntries = 20; }
 
         List<TranscriptEntry> visible;
@@ -365,27 +364,28 @@ internal sealed class SpectreUI
                                    bool test, int sec)
     {
         AnsiConsole.WriteLine();
-        AnsiConsole.Write(new Panel("[bold]通話文字起こしツール[/]")
-            .Border(BoxBorder.Double)
-            .BorderStyle(Style.Parse("white"))
-            .Padding(2, 0));
-        AnsiConsole.WriteLine();
 
         if (test)
-        {
             AnsiConsole.MarkupLine($"  [magenta][[テストモード]] {sec}秒後に自動停止[/]");
-            AnsiConsole.WriteLine();
-        }
 
         var gpuTag = engine.StartsWith("whisper")
-            ? (useGpu ? " [green][[GPU]][/]" : " [dim][[CPU]][/]")
+            ? (useGpu ? "[green]GPU[/]" : "[dim]CPU[/]")
             : "";
 
-        AnsiConsole.MarkupLine($"  [dim]エンジン    :[/] [white]{Markup.Escape(engine.ToUpperInvariant())}[/]{gpuTag}");
-        AnsiConsole.MarkupLine($"  [dim]マイク      :[/] [cyan]{Markup.Escape(mic)}[/]");
-        AnsiConsole.MarkupLine($"  [dim]スピーカー  :[/] [yellow]{Markup.Escape(speaker)}[/]");
-        AnsiConsole.MarkupLine($"  [dim]出力先      :[/] [white]{Markup.Escape(fileName)}[/]");
-        AnsiConsole.WriteLine();
+        // 1行目: エンジン + デバイス
+        AnsiConsole.MarkupLine(
+            $"  [white bold]{Markup.Escape(engine.ToUpperInvariant())}[/]" +
+            (gpuTag.Length > 0 ? $" ({gpuTag})" : "") +
+            $"  [dim]│[/]  [cyan]🎤 {Markup.Escape(TruncateDevice(mic))}[/]" +
+            $"  [dim]│[/]  [yellow]🔊 {Markup.Escape(TruncateDevice(speaker))}[/]" +
+            $"  [dim]│[/]  [dim]→[/] {Markup.Escape(fileName)}");
+    }
+
+    /// <summary>デバイス名が長い場合に短縮する</summary>
+    private static string TruncateDevice(string name)
+    {
+        const int max = 30;
+        return name.Length <= max ? name : name[..(max - 1)] + "…";
     }
 
     /// <summary>最終サマリーを表示する</summary>
