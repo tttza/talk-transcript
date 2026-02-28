@@ -26,55 +26,50 @@ internal static class ConfigMenu
             .Padding(2, 0));
         AnsiConsole.WriteLine();
 
+        var menuItems = new (string Label, Action? Action)[]
+        {
+            ("エンジン",         () => ConfigureEngine(settings, hwProfile)),
+            ("GPU (CUDA)",      () => ConfigureGpu(settings)),
+            ("言語",             () => ConfigureLanguage(settings)),
+            ("出力ディレクトリ",   () => ConfigureOutputDirectory(settings)),
+            ("出力フォーマット",   () => ConfigureOutputFormats(settings)),
+            ("デバイス",         () => ConfigureDevices(settings)),
+            ("録音保存",         () => ConfigureRecording(settings)),
+            ("設定をリセット",    () => ResetSettings(settings)),
+        };
+
         while (true)
         {
             // 現在の設定を表示
             PrintCurrentSettings(settings, hwProfile);
 
-            var choice = AnsiConsole.Prompt(
-                new SelectionPrompt<string>()
-                    .Title("[cyan]変更する項目を選択してください (↑↓で移動, Enterで確定):[/]")
-                    .AddChoices(
-                        "エンジン",
-                        "GPU (CUDA)",
-                        "言語",
-                        "出力ディレクトリ",
-                        "出力フォーマット",
-                        "デバイス",
-                        "録音保存",
-                        "設定をリセット",
-                        "← 戻る"));
+            // 番号付きメニューを表示
+            AnsiConsole.MarkupLine("[cyan]変更する項目を選択してください (番号を入力 / 0 で戻る):[/]");
+            AnsiConsole.WriteLine();
+            for (int i = 0; i < menuItems.Length; i++)
+            {
+                AnsiConsole.MarkupLine($"  [white]{i + 1}.[/] {menuItems[i].Label}");
+            }
+            AnsiConsole.MarkupLine($"  [dim]0. ← 戻る[/]");
+            AnsiConsole.WriteLine();
 
-            if (choice.StartsWith("←"))
+            var input = AnsiConsole.Prompt(
+                new TextPrompt<string>("  [cyan]>[/]")
+                    .ValidationErrorMessage("[red]  有効な番号を入力してください[/]")
+                    .Validate(v =>
+                    {
+                        if (int.TryParse(v.Trim(), out int n) && n >= 0 && n <= menuItems.Length)
+                            return ValidationResult.Success();
+                        return ValidationResult.Error();
+                    }));
+
+            int selected = int.Parse(input.Trim());
+            AnsiConsole.WriteLine();
+
+            if (selected == 0)
                 break;
 
-            switch (choice)
-            {
-                case "エンジン":
-                    ConfigureEngine(settings, hwProfile);
-                    break;
-                case "GPU (CUDA)":
-                    ConfigureGpu(settings);
-                    break;
-                case "言語":
-                    ConfigureLanguage(settings);
-                    break;
-                case "出力ディレクトリ":
-                    ConfigureOutputDirectory(settings);
-                    break;
-                case "出力フォーマット":
-                    ConfigureOutputFormats(settings);
-                    break;
-                case "デバイス":
-                    ConfigureDevices(settings);
-                    break;
-                case "録音保存":
-                    ConfigureRecording(settings);
-                    break;
-                case "設定をリセット":
-                    ResetSettings(settings);
-                    break;
-            }
+            menuItems[selected - 1].Action?.Invoke();
         }
     }
 
