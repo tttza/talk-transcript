@@ -14,6 +14,7 @@ Console.OutputEncoding = System.Text.Encoding.UTF8;
 Console.InputEncoding = System.Text.Encoding.UTF8;
 ConsoleHelper.SetFont("BIZ UDゴシック", 18);
 AppLogger.Initialize(AppLogger.LogLevel.Debug);
+Vosk.Vosk.SetLogLevel(-1);
 
 bool testMode = args.Contains("--test");
 bool diagMode = args.Contains("--diag");
@@ -203,27 +204,30 @@ while (!quit)
         : null;
 
     // ── トランスクライバ作成 ──
-    // 後処理 (Whisper 再認識) が可能な場合のみ録音バッファを有効化
+    // 後処理 (Whisper 再認識) が可能な場合、または録音保存が有効な場合に録音バッファを有効化
     bool canPostProcess = whisperModelSize == null
         && (ModelManager.GetWhisperModelPath("base") != null || ModelManager.GetWhisperModelPath("tiny") != null);
+    bool enableRecording = canPostProcess || settings.SaveRecording;
 
     ICallTranscriber callTranscriber;
     if (whisperModelSize != null)
     {
         string wModelPath = await ModelManager.EnsureWhisperModelAsync(whisperModelSize);
-        callTranscriber = new WhisperCallTranscriber(wModelPath, whisperModelSize, micDevice, speakerDevice, useGpu, language);
+        callTranscriber = new WhisperCallTranscriber(wModelPath, whisperModelSize, micDevice, speakerDevice, useGpu, language,
+            enableRecording: settings.SaveRecording);
     }
     else if (engineName == "vosk")
     {
         string voskModelPath = await ModelManager.EnsureVoskModelAsync();
         var voskModel = new Model(voskModelPath);
         callTranscriber = new VoskCallTranscriber(voskModel, micDevice, speakerDevice,
-            ownsModel: true, enableRecording: canPostProcess);
+            ownsModel: true, enableRecording: enableRecording);
     }
     else
     {
         string sapiCulture = language == "auto" ? "ja-JP" : (language + (language.Contains('-') ? "" : language == "ja" ? "-JP" : language == "en" ? "-US" : ""));
-        callTranscriber = new SapiCallTranscriber(micDevice, speakerDevice, sapiCulture);
+        callTranscriber = new SapiCallTranscriber(micDevice, speakerDevice, sapiCulture,
+            enableRecording: enableRecording);
     }
 
     lastTranscriber = callTranscriber;
@@ -320,43 +324,24 @@ while (!quit)
             quit = true;
             break;
 
-        case "device":
+        case "config":
             callTranscriber.Dispose();
-            SpectreUI.PrintSectionHeader("デバイス変更");
-            (micDevice, speakerDevice) = DeviceSelector.SelectDevices(settings);
-            Console.WriteLine();
-            break;
-
-        case "engine":
-            callTranscriber.Dispose();
-            SpectreUI.PrintSectionHeader("エンジン変更");
-            var newEngine = EngineSelector.SelectEngine(engineName, hwProfile);
-            if (newEngine != null)
+            ConfigMenu.Show(hwProfile);
+            // 設定を再読み込み
+            settings = AppSettings.Load();
+            if (settings.EngineName != null)
+                engineName = settings.EngineName.ToLowerInvariant();
+            useGpu = settings.UseGpu;
+            if (!string.IsNullOrEmpty(settings.Language))
+                language = settings.Language;
+            // デバイス再読み込み
+            try
             {
-                engineName = newEngine;
-                var es = AppSettings.Load();
-                es.EngineName = engineName;
-                es.Save();
+                (micDevice, speakerDevice) = DeviceSelector.LoadSavedDevices(settings);
             }
-            Console.WriteLine();
-            break;
-
-        case "gpu":
-            callTranscriber.Dispose();
-            if (!useGpu && !cudaAvailable)
+            catch
             {
-                AnsiConsole.MarkupLine("  [yellow]⚠ CUDA Toolkit (cublas64_13.dll) が未インストールのため GPU に切り替えできません[/]");
-            }
-            else
-            {
-                useGpu = !useGpu;
-                var gs = AppSettings.Load();
-                gs.UseGpu = useGpu;
-                gs.Save();
-                if (useGpu)
-                    AnsiConsole.MarkupLine("  [green]→ GPU (CUDA) モードに切り替えました[/]");
-                else
-                    AnsiConsole.MarkupLine("  [yellow]→ CPU モードに切り替えました[/]");
+                // デバイスが変更/削除された場合はそのまま
             }
             Console.WriteLine();
             break;
@@ -395,6 +380,12 @@ void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
 {
     var micPcm = transcriber.GetMicRecording();
     var spkPcm = transcriber.GetSpeakerRecording();
+
+    // ── 録音保存 ──
+    if (settings.SaveRecording)
+    {
+        SaveRecordingToWav(micPcm, spkPcm, fp);
+    }
 
     string? whisperPostModelPath = whisperSize != null
         ? null
@@ -436,6 +427,42 @@ void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
     else if (whisperPostModelPath == null && hasRecording && whisperSize == null)
     {
         AnsiConsole.MarkupLine("  [dim](Whisper モデルなし → 後処理スキップ。dotnet run -- --whisper-only でダウンロード可能)[/]");
+    }
+}
+
+/// <summary>
+/// 録音データ (16kHz/16bit/mono PCM) を WAV ファイルとして保存する。
+/// ファイルはトランスクリプトと同じディレクトリに保存される。
+/// </summary>
+void SaveRecordingToWav(byte[] micPcm, byte[] spkPcm, string transcriptPath)
+{
+    if (micPcm.Length == 0 && spkPcm.Length == 0) return;
+
+    string dir = Path.GetDirectoryName(transcriptPath) ?? ".";
+    string baseName = Path.GetFileNameWithoutExtension(transcriptPath);
+
+    try
+    {
+        if (micPcm.Length > 0)
+        {
+            string micPath = Path.Combine(dir, $"{baseName}_mic.wav");
+            using var fs = File.Create(micPath);
+            AudioProcessing.WriteWavPcm16(fs, micPcm, 16000);
+            AnsiConsole.MarkupLine($"  [green]✓[/] マイク録音: [white]{Markup.Escape(micPath)}[/]");
+        }
+
+        if (spkPcm.Length > 0)
+        {
+            string spkPath = Path.Combine(dir, $"{baseName}_speaker.wav");
+            using var fs = File.Create(spkPath);
+            AudioProcessing.WriteWavPcm16(fs, spkPcm, 16000);
+            AnsiConsole.MarkupLine($"  [green]✓[/] スピーカー録音: [white]{Markup.Escape(spkPath)}[/]");
+        }
+    }
+    catch (Exception ex)
+    {
+        AppLogger.Error("録音データの保存に失敗", ex);
+        AnsiConsole.MarkupLine($"  [yellow]録音データの保存に失敗: {Markup.Escape(ex.Message)}[/]");
     }
 }
 

@@ -183,12 +183,8 @@ internal sealed class SpectreUI
         var key = Console.ReadKey(intercept: true);
         if (key.Key == ConsoleKey.Q && key.Modifiers.HasFlag(ConsoleModifiers.Control))
             return "quit";
-        if (key.Key == ConsoleKey.D && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-            return "device";
-        if (key.Key == ConsoleKey.E && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-            return "engine";
-        if (key.Key == ConsoleKey.G && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-            return "gpu";
+        if (key.Key == ConsoleKey.F2)
+            return "config";
         if (key.Key == ConsoleKey.B && key.Modifiers.HasFlag(ConsoleModifiers.Control))
         {
             AddBookmark();
@@ -258,9 +254,7 @@ internal sealed class SpectreUI
         {
             rows.Add(new Markup(
                 "  [white bold]Ctrl+Q[/] [dim]停止[/]  │  " +
-                "[white bold]Ctrl+D[/] [dim]デバイス[/]  │  " +
-                "[white bold]Ctrl+E[/] [dim]エンジン[/]  │  " +
-                "[white bold]Ctrl+G[/] [dim]GPU切替[/]  │  " +
+                "[white bold]F2[/] [dim]設定[/]  │  " +
                 "[white bold]Ctrl+B[/] [dim]ブックマーク[/]"));
         }
 

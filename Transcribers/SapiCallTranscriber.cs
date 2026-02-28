@@ -41,6 +41,13 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     private bool _disposed;
     private bool _recognizerStarted;
 
+    // ── 録音バッファ ──
+    private readonly bool _enableRecording;
+    private readonly MemoryStream? _micRecording;
+    private readonly MemoryStream? _speakerRecording;
+    private readonly object _micRecLock = new();
+    private readonly object _speakerRecLock = new();
+
     // ── 音量トラッキングとソース切り替え ──
     /// <summary>現在アクティブなソース (true = マイク, false = スピーカー)</summary>
     private volatile bool _micActive = true;
@@ -91,10 +98,18 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     /// <summary>音量レベルが更新されたときに発火 (micPeak, speakerPeak)</summary>
     public event Action<float, float>? OnVolumeUpdated;
 
-    public SapiCallTranscriber(MMDevice micDevice, MMDevice speakerDevice, string culture = "ja-JP")
+    public SapiCallTranscriber(MMDevice micDevice, MMDevice speakerDevice, string culture = "ja-JP",
+        bool enableRecording = false)
     {
         _engine = new SpeechRecognitionEngine(new CultureInfo(culture));
         _audioStream = new SpeechAudioStream();
+
+        _enableRecording = enableRecording;
+        if (enableRecording)
+        {
+            _micRecording = new MemoryStream();
+            _speakerRecording = new MemoryStream();
+        }
 
         // ── マイク: WaveInEvent (MME API) ──
         int deviceNumber = DeviceHelper.FindWaveInDevice(micDevice, "通話");
@@ -192,6 +207,15 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         // 音量通知 (#2)
         OnVolumeUpdated?.Invoke(_micPeak, _speakerPeak);
 
+        // 録音バッファに保存
+        if (_enableRecording)
+        {
+            lock (_micRecLock)
+            {
+                _micRecording!.Write(e.Buffer, 0, e.BytesRecorded);
+            }
+        }
+
         // 初回ログ
         if (_micChunks <= 3)
             Console.WriteLine($"[通話] マイク chunk#{_micChunks}: {e.BytesRecorded} bytes, ピーク={maxSample}");
@@ -235,6 +259,15 @@ public sealed class SapiCallTranscriber : ICallTranscriber
 
         // 音量通知 (#2)
         OnVolumeUpdated?.Invoke(_micPeak, _speakerPeak);
+
+        // 録音バッファに保存
+        if (_enableRecording)
+        {
+            lock (_speakerRecLock)
+            {
+                _speakerRecording!.Write(converted, 0, converted.Length);
+            }
+        }
 
         // 初回ログ
         if (_speakerChunks <= 3)
@@ -381,11 +414,19 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         Console.WriteLine("[通話] 音声認識を停止しました");
     }
 
-    /// <summary>SAPI 版では録音バッファを保持しないため空を返す</summary>
-    public byte[] GetMicRecording() => Array.Empty<byte>();
+    /// <summary>SAPI 版の録音データを返す (enableRecording=true の場合のみ)</summary>
+    public byte[] GetMicRecording()
+    {
+        if (!_enableRecording) return Array.Empty<byte>();
+        lock (_micRecLock) return _micRecording!.ToArray();
+    }
 
-    /// <summary>SAPI 版では録音バッファを保持しないため空を返す</summary>
-    public byte[] GetSpeakerRecording() => Array.Empty<byte>();
+    /// <summary>SAPI 版の録音データを返す (enableRecording=true の場合のみ)</summary>
+    public byte[] GetSpeakerRecording()
+    {
+        if (!_enableRecording) return Array.Empty<byte>();
+        lock (_speakerRecLock) return _speakerRecording!.ToArray();
+    }
 
     // ────────────────────────────────────────────────
     //  破棄
@@ -409,6 +450,8 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         _engine.Dispose();
         _audioStream.Dispose();
         _recognizeCompleted.Dispose();
+        _micRecording?.Dispose();
+        _speakerRecording?.Dispose();
 
         GC.SuppressFinalize(this);
     }

@@ -1,3 +1,4 @@
+using Spectre.Console;
 using TalkTranscript.Logging;
 using TalkTranscript.Output;
 
@@ -5,7 +6,7 @@ namespace TalkTranscript;
 
 /// <summary>
 /// エンジン選択メニューを表示し、ユーザーにエンジンを選ばせる。
-/// Program.cs から抽出。
+/// Spectre.Console の SelectionPrompt で ↑↓ カーソル選択に対応。
 /// </summary>
 internal static class EngineSelector
 {
@@ -27,79 +28,66 @@ internal static class EngineSelector
     public static string? SelectEngine(string currentEngine, HardwareInfo.EnvironmentProfile hwProfile)
     {
         // 環境情報表示
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.Write("  環境: ");
-        Console.ForegroundColor = ConsoleColor.White;
         if (hwProfile.HasNvidiaGpu)
-            Console.Write($"{hwProfile.GpuName} ({hwProfile.GpuVramMB / 1024}GB)");
+            AnsiConsole.MarkupLine($"  [dim]環境:[/] [white]{Markup.Escape(hwProfile.GpuName ?? "GPU")} ({hwProfile.GpuVramMB / 1024}GB)[/]");
         else
-            Console.Write($"CPU {hwProfile.CpuCores}コア / RAM {hwProfile.SystemRamMB / 1024}GB");
-        Console.ResetColor();
-        Console.WriteLine();
-        Console.WriteLine();
+            AnsiConsole.MarkupLine($"  [dim]環境:[/] [white]CPU {hwProfile.CpuCores}コア / RAM {hwProfile.SystemRamMB / 1024}GB[/]");
+        AnsiConsole.WriteLine();
 
-        Console.WriteLine("  エンジンを選択:");
-        Console.WriteLine();
+        // 選択肢を構築 (レーティング + ラベル + 説明 + 現在/推奨マーカー)
+        const string cancelLabel = "← キャンセル";
+        var choices = new List<string>();
+        int defaultIndex = -1;
 
         for (int i = 0; i < Engines.Length; i++)
         {
             var (id, label, desc) = Engines[i];
+            string rating = HardwareInfo.GetRecommendation(id, hwProfile);
             bool isCurrent = id == currentEngine;
             bool isRecommended = id == hwProfile.RecommendedEngine;
-            string rating = HardwareInfo.GetRecommendation(id, hwProfile);
 
-            Console.ForegroundColor = isCurrent ? ConsoleColor.Green : ConsoleColor.Gray;
-            Console.Write($"  {i + 1}. ");
+            string marker = isCurrent ? " ← 現在" : isRecommended ? " ← 推奨" : "";
+            string display = $"{rating} {label,-16} {desc}{marker}";
+            choices.Add(display);
 
-            if (rating == "★")
-                Console.ForegroundColor = ConsoleColor.Green;
-            else if (rating == "△")
-                Console.ForegroundColor = ConsoleColor.Yellow;
-            else if (rating == "✕")
-                Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.Write($"{rating,-2}");
-
-            Console.ForegroundColor = isCurrent ? ConsoleColor.Green : ConsoleColor.White;
-            Console.Write($"{label,-16}");
-
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.Write(desc);
-
-            if (isCurrent)
-            {
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.Write(" ← 現在");
-            }
-            else if (isRecommended)
-            {
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.Write(" ← 推奨");
-            }
-
-            Console.ResetColor();
-            Console.WriteLine();
+            if (isCurrent) defaultIndex = i;
         }
 
-        Console.WriteLine();
-        Console.Write($"  番号 [1-{Engines.Length}] (Enter でキャンセル): ");
+        choices.Add(cancelLabel);
 
-        string? input = Console.ReadLine();
-        if (int.TryParse(input, out int choice) && choice >= 1 && choice <= Engines.Length)
+        // 現在選択中のエンジンが先頭に来るように並び替え
+        var orderedChoices = new List<string>(choices);
+        if (defaultIndex >= 0)
         {
-            var (selId, selLabel, _) = Engines[choice - 1];
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"  → {selLabel}");
-            Console.ResetColor();
+            var current = orderedChoices[defaultIndex];
+            orderedChoices.RemoveAt(defaultIndex);
+            orderedChoices.Insert(0, current);
+        }
+
+        var selected = AnsiConsole.Prompt(
+            new SelectionPrompt<string>()
+                .Title("[cyan]  エンジンを選択 (↑↓で移動, Enterで確定):[/]")
+                .PageSize(10)
+                .HighlightStyle(Style.Parse("bold cyan"))
+                .AddChoices(orderedChoices));
+
+        if (selected == cancelLabel)
+        {
+            AnsiConsole.MarkupLine("  [dim]キャンセルしました[/]");
+            return null;
+        }
+
+        // 選択されたインデックスからエンジンIDを逆引き
+        int idx = choices.IndexOf(selected);
+        if (idx >= 0 && idx < Engines.Length)
+        {
+            var (selId, selLabel, _) = Engines[idx];
+            AnsiConsole.MarkupLine($"  [green]→ {Markup.Escape(selLabel)}[/]");
             AppLogger.Info($"エンジン変更: {selId}");
             return selId;
         }
-        else
-        {
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine("  キャンセルしました");
-            Console.ResetColor();
-            return null;
-        }
+
+        return null;
     }
 
     /// <summary>コマンドライン引数からフォーマットをパースする</summary>

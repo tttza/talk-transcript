@@ -33,41 +33,45 @@ internal static class ConfigMenu
 
             var choice = AnsiConsole.Prompt(
                 new SelectionPrompt<string>()
-                    .Title("[cyan]変更する項目を選択してください:[/]")
+                    .Title("[cyan]変更する項目を選択してください (↑↓で移動, Enterで確定):[/]")
                     .AddChoices(
-                        "1. エンジン",
-                        "2. GPU (CUDA)",
-                        "3. 言語",
-                        "4. 出力ディレクトリ",
-                        "5. 出力フォーマット",
-                        "6. デバイス",
-                        "7. 設定をリセット",
+                        "エンジン",
+                        "GPU (CUDA)",
+                        "言語",
+                        "出力ディレクトリ",
+                        "出力フォーマット",
+                        "デバイス",
+                        "録音保存",
+                        "設定をリセット",
                         "← 戻る"));
 
             if (choice.StartsWith("←"))
                 break;
 
-            switch (choice[0])
+            switch (choice)
             {
-                case '1':
+                case "エンジン":
                     ConfigureEngine(settings, hwProfile);
                     break;
-                case '2':
+                case "GPU (CUDA)":
                     ConfigureGpu(settings);
                     break;
-                case '3':
+                case "言語":
                     ConfigureLanguage(settings);
                     break;
-                case '4':
+                case "出力ディレクトリ":
                     ConfigureOutputDirectory(settings);
                     break;
-                case '5':
+                case "出力フォーマット":
                     ConfigureOutputFormats(settings);
                     break;
-                case '6':
+                case "デバイス":
                     ConfigureDevices(settings);
                     break;
-                case '7':
+                case "録音保存":
+                    ConfigureRecording(settings);
+                    break;
+                case "設定をリセット":
                     ResetSettings(settings);
                     break;
             }
@@ -92,6 +96,7 @@ internal static class ConfigMenu
             : "テキスト (.txt) のみ";
         table.AddRow("出力フォーマット", Markup.Escape(formats));
 
+        table.AddRow("録音保存", settings.SaveRecording ? "[green]有効[/]" : "[dim]無効[/]");
         table.AddRow("マイク", Markup.Escape(settings.MicrophoneDeviceName ?? "(未設定)"));
         table.AddRow("スピーカー", Markup.Escape(settings.SpeakerDeviceName ?? "(未設定)"));
 
@@ -214,6 +219,14 @@ internal static class ConfigMenu
         AnsiConsole.WriteLine();
     }
 
+    private static void ConfigureRecording(AppSettings settings)
+    {
+        settings.SaveRecording = AnsiConsole.Confirm("  録音データを WAV ファイルとして保存しますか?", settings.SaveRecording);
+        settings.Save();
+        AnsiConsole.MarkupLine($"  [green]→ 録音保存: {(settings.SaveRecording ? "有効" : "無効")}[/]");
+        AnsiConsole.WriteLine();
+    }
+
     private static void ResetSettings(AppSettings settings)
     {
         if (AnsiConsole.Confirm("  [yellow]すべての設定をリセットしますか?[/]", false))
@@ -235,6 +248,7 @@ internal static class ConfigMenu
             settings.MicrophoneDeviceName = fresh.MicrophoneDeviceName;
             settings.SpeakerDeviceId = fresh.SpeakerDeviceId;
             settings.SpeakerDeviceName = fresh.SpeakerDeviceName;
+            settings.SaveRecording = fresh.SaveRecording;
 
             AnsiConsole.MarkupLine("  [green]設定をリセットしました。[/]");
         }

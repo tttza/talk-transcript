@@ -1,10 +1,12 @@
 using NAudio.CoreAudioApi;
+using Spectre.Console;
 using TalkTranscript.Models;
 
 namespace TalkTranscript.Audio;
 
 /// <summary>
-/// オーディオデバイスを列挙し、ユーザーに番号で選ばせるヘルパー。
+/// オーディオデバイスを列挙し、ユーザーにカーソルで選ばせるヘルパー。
+/// Spectre.Console の SelectionPrompt で ↑↓ カーソル選択に対応。
 /// 前回選択を AppSettings から復元し、変更があれば保存する。
 /// </summary>
 public static class DeviceSelector
@@ -30,7 +32,7 @@ public static class DeviceSelector
 
     /// <summary>
     /// マイクとスピーカーのデバイスを選択させる。
-    /// 前回の設定がありデバイスが存在すればそれを提示し、Enter で再利用できる。
+    /// 前回の設定がありデバイスが存在すればそれをデフォルトにする。
     /// </summary>
     /// <returns>(マイクデバイス, スピーカーデバイス)</returns>
     public static (MMDevice Microphone, MMDevice Speaker) SelectDevices(AppSettings settings)
@@ -38,7 +40,7 @@ public static class DeviceSelector
         using var enumerator = new MMDeviceEnumerator();
 
         // ── マイク選択 ──
-        Console.WriteLine("── マイクデバイスを選択してください ──");
+        AnsiConsole.MarkupLine("  [cyan]── マイクデバイスを選択 ──[/]");
         var mic = SelectDevice(
             enumerator,
             DataFlow.Capture,
@@ -47,10 +49,10 @@ public static class DeviceSelector
 
         settings.MicrophoneDeviceId = mic.ID;
         settings.MicrophoneDeviceName = mic.FriendlyName;
-        Console.WriteLine();
+        AnsiConsole.WriteLine();
 
         // ── スピーカー選択 ──
-        Console.WriteLine("── スピーカーデバイスを選択してください ──");
+        AnsiConsole.MarkupLine("  [cyan]── スピーカーデバイスを選択 ──[/]");
         var speaker = SelectDevice(
             enumerator,
             DataFlow.Render,
@@ -59,13 +61,11 @@ public static class DeviceSelector
 
         settings.SpeakerDeviceId = speaker.ID;
         settings.SpeakerDeviceName = speaker.FriendlyName;
-        Console.WriteLine();
+        AnsiConsole.WriteLine();
 
         // 設定を保存
         settings.Save();
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.WriteLine($"設定を保存しました: {AppSettings.FilePath}");
-        Console.ResetColor();
+        AnsiConsole.MarkupLine($"  [dim]設定を保存しました: {Markup.Escape(AppSettings.FilePath)}[/]");
 
         return (mic, speaker);
     }
@@ -87,6 +87,13 @@ public static class DeviceSelector
                 $"利用可能な{kind}デバイスが見つかりませんでした。");
         }
 
+        // デバイスが1つしかない場合は自動選択
+        if (devices.Count == 1)
+        {
+            AnsiConsole.MarkupLine($"  [green]→ {Markup.Escape(devices[0].FriendlyName)} (自動選択)[/]");
+            return devices[0];
+        }
+
         // 前回選択のインデックスを探す
         int? savedIndex = null;
         if (!string.IsNullOrEmpty(savedDeviceId))
@@ -95,62 +102,39 @@ public static class DeviceSelector
             if (savedIndex < 0) savedIndex = null;
         }
 
-        // デバイス一覧を表示
-        for (int i = 0; i < devices.Count; i++)
+        // 選択肢を構築
+        var choices = devices.Select((d, i) =>
         {
-            var marker = (savedIndex == i) ? " ★前回" : "";
-            Console.WriteLine($"  {i + 1}. {devices[i].FriendlyName}{marker}");
-        }
+            string marker = (savedIndex == i) ? " ★前回" : "";
+            return $"{Markup.Remove(d.FriendlyName)}{marker}";
+        }).ToList();
 
-        // 前回の選択がある場合のプロンプト
+        // 前回選択が先頭に来るように並び替え
+        var orderedChoices = new List<string>(choices);
         if (savedIndex.HasValue)
         {
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.Write($"番号を入力 (Enter で前回のまま [{savedIndex.Value + 1}. {savedDeviceName}]): ");
-            Console.ResetColor();
+            var prev = orderedChoices[savedIndex.Value];
+            orderedChoices.RemoveAt(savedIndex.Value);
+            orderedChoices.Insert(0, prev);
         }
-        else
+
+        var selected = AnsiConsole.Prompt(
+            new SelectionPrompt<string>()
+                .Title("[cyan]  ↑↓で移動, Enterで確定:[/]")
+                .PageSize(10)
+                .HighlightStyle(Style.Parse("bold cyan"))
+                .AddChoices(orderedChoices));
+        int idx = choices.IndexOf(selected);
+        if (idx >= 0 && idx < devices.Count)
         {
-            Console.Write("番号を入力: ");
+            AnsiConsole.MarkupLine($"  [green]→ {Markup.Escape(devices[idx].FriendlyName)}[/]");
+            return devices[idx];
         }
 
-        var input = Console.ReadLine()?.Trim();
-
-        // Enter のみ → 前回の選択を使用
-        if (string.IsNullOrEmpty(input))
-        {
-            if (savedIndex.HasValue)
-            {
-                var device = devices[savedIndex.Value];
-                Console.WriteLine($"  → {device.FriendlyName}");
-                return device;
-            }
-
-            // 前回なし & 入力なし → デバイスが1つなら自動選択
-            if (devices.Count == 1)
-            {
-                Console.WriteLine($"  → {devices[0].FriendlyName} (自動選択)");
-                return devices[0];
-            }
-        }
-
-        // 番号で選択
-        if (int.TryParse(input, out int num) && num >= 1 && num <= devices.Count)
-        {
-            var device = devices[num - 1];
-            Console.WriteLine($"  → {device.FriendlyName}");
-            return device;
-        }
-
-        // 不正入力 → 前回があればそれ、なければ最初のデバイス
+        // フォールバック: 前回 or 最初
         if (savedIndex.HasValue)
-        {
-            var device = devices[savedIndex.Value];
-            Console.WriteLine($"  → {device.FriendlyName} (前回の選択)");
-            return device;
-        }
+            return devices[savedIndex.Value];
 
-        Console.WriteLine($"  → {devices[0].FriendlyName} (デフォルト)");
         return devices[0];
     }
 }

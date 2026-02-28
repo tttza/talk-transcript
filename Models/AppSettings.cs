@@ -33,6 +33,9 @@ public class AppSettings
     /// <summary>出力ディレクトリ (null の場合は既定の Transcripts/ を使用)</summary>
     public string? OutputDirectory { get; set; }
 
+    /// <summary>録音データを WAV ファイルとして保存するか</summary>
+    public bool SaveRecording { get; set; } = false;
+
     /// <summary>追加の出力フォーマット (テキスト出力は常に行われる)</summary>
     [JsonConverter(typeof(OutputFormatsConverter))]
     public List<OutputFormat>? OutputFormats { get; set; }
