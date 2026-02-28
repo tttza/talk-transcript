@@ -25,6 +25,7 @@ public sealed class MicTranscriber : IDisposable
     private readonly ManualResetEventSlim _recognizeCompleted = new(false);
     private bool _disposed;
     private bool _recognizerStarted;
+    private volatile bool _stopping;
     private int _dataChunksReceived;
     private int _totalBytesWritten;
 
@@ -132,8 +133,8 @@ public sealed class MicTranscriber : IDisposable
             for (int j = 0; j + 1 < e.BytesRecorded; j += 2)
             {
                 short s = BitConverter.ToInt16(e.Buffer, j);
-                short abs = Math.Abs(s);
-                if (abs > maxSample) maxSample = abs;
+                int abs = Math.Abs((int)s); // short.MinValue (-32768) でも安全
+                if (abs > maxSample) maxSample = (short)Math.Min(abs, short.MaxValue);
             }
             Console.WriteLine($"[マイク] chunk#{_dataChunksReceived}: {e.BytesRecorded} bytes, ピーク={maxSample}");
         }
@@ -198,6 +199,9 @@ public sealed class MicTranscriber : IDisposable
     /// </summary>
     public void Stop()
     {
+        if (_stopping) return;
+        _stopping = true;
+
         Console.WriteLine($"[マイク] 停止中... (書き込みバイト: {_totalBytesWritten:N0})");
 
         // 先にストリームを完了させて Read がブロックしないようにする
@@ -224,6 +228,10 @@ public sealed class MicTranscriber : IDisposable
     public void Dispose()
     {
         if (_disposed) return;
+
+        // Stop() が未呼出の場合に安全に停止
+        Stop();
+
         _disposed = true;
 
         _capture.DataAvailable -= OnCaptureDataAvailable;

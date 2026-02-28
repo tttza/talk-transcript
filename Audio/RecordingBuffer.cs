@@ -44,7 +44,7 @@ internal sealed class RecordingBuffer : IDisposable
         if (!enabled) return;
 
         // 初期容量 = 想定チャンク数の 1/4 (リスト再確保を減らす)
-        int estimatedChunks = (int)(maxBytes / ChunkSize / 4) + 1;
+        int estimatedChunks = (int)(_maxBytes / ChunkSize / 4) + 1;
         _chunks = new List<byte[]>(estimatedChunks);
     }
 
@@ -121,6 +121,13 @@ internal sealed class RecordingBuffer : IDisposable
         lock (_lock)
         {
             if (_totalBytes == 0) return;
+
+            // WAV (RIFF) フォーマットはデータサイズが 32bit のため 2GB 超を書けない
+            if (_totalBytes > int.MaxValue)
+            {
+                throw new InvalidOperationException(
+                    $"録音データが WAV 上限 (2GB) を超えています ({_totalBytes / (1024 * 1024)}MB)。");
+            }
 
             using var output = File.Create(wavPath);
             WriteWavPcm16Header(output, (int)_totalBytes, sampleRate);

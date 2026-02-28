@@ -413,6 +413,10 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     public void Dispose()
     {
         if (_disposed) return;
+
+        // Stop() が未呼出の場合に安全に停止 (処理中にリソースを破棄しない)
+        if (!_stopping) Stop();
+
         _disposed = true;
 
         _micCapture.DataAvailable -= OnMicDataAvailable;

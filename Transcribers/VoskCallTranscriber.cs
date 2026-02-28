@@ -342,27 +342,43 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         try { _speakerCapture.StopRecording(); } catch { }
 
         // Producer-Consumer スレッドの完了を待つ
-        _micProcessThread?.Join(TimeSpan.FromSeconds(10));
-        _spkProcessThread?.Join(TimeSpan.FromSeconds(10));
+        bool micJoined = _micProcessThread?.Join(TimeSpan.FromSeconds(10)) ?? true;
+        bool spkJoined = _spkProcessThread?.Join(TimeSpan.FromSeconds(10)) ?? true;
 
-        // 残りの音声を最終認識
-        try
+        // スレッドが正常終了した場合のみ FinalResult を呼ぶ
+        // (タイムアウトした場合はスレッドがまだ認識器にアクセス中のためスキップ)
+        if (micJoined)
         {
-            if (_micRecognizer != null)
-                ProcessResult(_micRecognizer.FinalResult(), "自分");
+            try
+            {
+                if (_micRecognizer != null)
+                    ProcessResult(_micRecognizer.FinalResult(), "自分");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Vosk] マイク最終結果エラー (無視): {ex.Message}");
+            }
         }
-        catch (Exception ex)
+        else
         {
-            Console.WriteLine($"[Vosk] マイク最終結果エラー (無視): {ex.Message}");
+            AppLogger.Warn("[Vosk] マイク処理スレッドがタイムアウト — FinalResult をスキップ");
         }
-        try
+
+        if (spkJoined)
         {
-            if (_speakerRecognizer != null)
-                ProcessResult(_speakerRecognizer.FinalResult(), "相手");
+            try
+            {
+                if (_speakerRecognizer != null)
+                    ProcessResult(_speakerRecognizer.FinalResult(), "相手");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Vosk] スピーカー最終結果エラー (無視): {ex.Message}");
+            }
         }
-        catch (Exception ex)
+        else
         {
-            Console.WriteLine($"[Vosk] スピーカー最終結果エラー (無視): {ex.Message}");
+            AppLogger.Warn("[Vosk] スピーカー処理スレッドがタイムアウト — FinalResult をスキップ");
         }
 
         long micBytes = _micRecording.Length;
@@ -392,6 +408,10 @@ public sealed class VoskCallTranscriber : ICallTranscriber
     public void Dispose()
     {
         if (_disposed) return;
+
+        // Stop() が未呼出の場合に安全に停止 (処理スレッドが認識器にアクセス中に破棄しない)
+        if (!_stopping) Stop();
+
         _disposed = true;
 
         _micCapture.DataAvailable -= OnMicDataAvailable;

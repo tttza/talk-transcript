@@ -246,6 +246,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             {
                 long dropped = _micBuffer.Length;
                 int keep = (int)(capacity / 2);
+                keep = keep - (keep % 2); // サンプル境界 (16bit=2bytes) にアライン
                 byte[] tail = _micBuffer.ToArray()[(int)(_micBuffer.Length - keep)..];
                 _micBuffer.SetLength(0);
                 _micBuffer.Write(tail, 0, tail.Length);
@@ -304,6 +305,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             {
                 long dropped = _speakerBuffer.Length;
                 int keep = (int)(capacity / 2);
+                keep = keep - (keep % 2); // サンプル境界 (16bit=2bytes) にアライン
                 byte[] tail = _speakerBuffer.ToArray()[(int)(_speakerBuffer.Length - keep)..];
                 _speakerBuffer.SetLength(0);
                 _speakerBuffer.Write(tail, 0, tail.Length);
@@ -572,6 +574,10 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     public void Dispose()
     {
         if (_disposed) return;
+
+        // Stop() が未呼出の場合に安全に停止 (処理スレッドが走行中にリソースを破棄しない)
+        if (!_stopping) Stop();
+
         _disposed = true;
 
         _micCapture.DataAvailable -= OnMicDataAvailable;

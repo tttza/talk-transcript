@@ -342,6 +342,8 @@ while (!quit)
                 engineName = (settings.EngineName ?? hwProfile.RecommendedEngine).ToLowerInvariant();
                 useGpu = settings.EngineName != null ? settings.UseGpu : hwProfile.RecommendedUseGpu;
             }
+            // セッション開始時刻をリセット (Whisper 後処理のタイムスタンプが正しくなるよう)
+            overallStart = DateTime.Now;
             // プロセス優先度を再適用
             ConfigMenu.ApplyProcessPriority(settings.ProcessPriority);
             // --lang 引数が指定されていればそちらを優先
@@ -568,7 +570,7 @@ void RunDiagnostics()
             for (int i = 0; i + 1 < e.BytesRecorded; i += 2)
             {
                 short sample = BitConverter.ToInt16(e.Buffer, i);
-                short abs = Math.Abs(sample);
+                int abs = Math.Abs((int)sample); // short.MinValue (-32768) でも安全
                 totalSamples++;
                 if (abs > maxPeak) maxPeak = abs;
                 if (abs > 100) nonZeroSamples++;

@@ -27,6 +27,7 @@ public sealed class SpeakerTranscriber : IDisposable
     private WaveFormat? _captureFormat;
     private bool _disposed;
     private bool _recognizerStarted;
+    private volatile bool _stopping;
     private int _dataChunksReceived;
     private int _totalBytesWritten;
 
@@ -215,6 +216,9 @@ public sealed class SpeakerTranscriber : IDisposable
     /// </summary>
     public void Stop()
     {
+        if (_stopping) return;
+        _stopping = true;
+
         Console.WriteLine($"[スピーカー] 停止中... (変換済みバイト: {_totalBytesWritten:N0})");
 
         _audioStream.Complete();
@@ -239,6 +243,10 @@ public sealed class SpeakerTranscriber : IDisposable
     public void Dispose()
     {
         if (_disposed) return;
+
+        // Stop() が未呼出の場合に安全に停止
+        Stop();
+
         _disposed = true;
 
         _loopback.DataAvailable -= OnLoopbackDataAvailable;

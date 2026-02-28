@@ -46,8 +46,12 @@ public sealed class TranscriptWriter : IDisposable
     /// </summary>
     public void Append(TranscriptEntry entry)
     {
+        if (_closed || _disposed) return;
+
         lock (_writer)
         {
+            if (_closed || _disposed) return; // ロック取得後に再チェック (ダブルチェックロック)
+
             _firstTimestamp ??= entry.Timestamp;
             _lastTimestamp = entry.Timestamp;
 
