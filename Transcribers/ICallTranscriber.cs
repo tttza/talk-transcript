@@ -34,4 +34,16 @@ public interface ICallTranscriber : IDisposable
 
     /// <summary>スピーカーの録音済み PCM (16kHz/16bit/mono) を返す (Whisper 後処理用)</summary>
     byte[] GetSpeakerRecording();
+
+    /// <summary>マイク録音を WAV ファイルとして保存する (ストリーミング方式 — 全体を byte[] にしない)</summary>
+    void SaveMicRecordingAsWav(string path);
+
+    /// <summary>スピーカー録音を WAV ファイルとして保存する (ストリーミング方式)</summary>
+    void SaveSpeakerRecordingAsWav(string path);
+
+    /// <summary>マイク録音のバイト数</summary>
+    long MicRecordingLength { get; }
+
+    /// <summary>スピーカー録音のバイト数</summary>
+    long SpeakerRecordingLength { get; }
 }

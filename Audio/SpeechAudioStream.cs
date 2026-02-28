@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using TalkTranscript.Logging;
 
 namespace TalkTranscript.Audio;
 
@@ -7,14 +8,32 @@ namespace TalkTranscript.Audio;
 /// 橋渡しするスレッドセーフなストリーム。
 /// ループバック側が Write() でオーディオデータを書き込み、
 /// SpeechRecognitionEngine が Read() で読み取る。
+///
+/// 有界バッファを使用し、上限を超えた場合は最も古いデータを破棄して
+/// メモリの無制限成長を防止する。
 /// </summary>
 public sealed class SpeechAudioStream : Stream
 {
-    private readonly BlockingCollection<byte[]> _buffer = new();
+    /// <summary>16kHz/16bit/mono 約10秒分 ≒ 320KB / 約3.2KB per chunk = 100 チャンク</summary>
+    private const int DefaultBoundedCapacity = 100;
+
+    private readonly BlockingCollection<byte[]> _buffer;
     private byte[] _currentChunk = Array.Empty<byte>();
     private int _currentOffset;
     private long _position;
     private volatile bool _done;
+    private long _droppedBytes;
+
+    /// <summary>バッファ溢れにより破棄されたバイト数</summary>
+    public long DroppedBytes => Interlocked.Read(ref _droppedBytes);
+
+    /// <param name="boundedCapacity">内部キューの最大チャンク数 (0 = 無制限)</param>
+    public SpeechAudioStream(int boundedCapacity = DefaultBoundedCapacity)
+    {
+        _buffer = boundedCapacity > 0
+            ? new BlockingCollection<byte[]>(boundedCapacity)
+            : new BlockingCollection<byte[]>();
+    }
 
     public override bool CanRead => true;
     public override bool CanSeek => true;  // SpeechRecognitionEngine が Seek 可能を期待する
@@ -75,6 +94,7 @@ public sealed class SpeechAudioStream : Stream
 
     /// <summary>
     /// ループバックキャプチャ側からオーディオデータを書き込む。
+    /// バッファが上限に達した場合は最も古いチャンクを破棄して新しいデータを追加する。
     /// </summary>
     public override void Write(byte[] buffer, int offset, int count)
     {
@@ -82,7 +102,20 @@ public sealed class SpeechAudioStream : Stream
 
         var data = new byte[count];
         Buffer.BlockCopy(buffer, offset, data, 0, count);
-        _buffer.Add(data);
+
+        if (!_buffer.TryAdd(data, TimeSpan.FromMilliseconds(50)))
+        {
+            // バッファが満杯 → 最も古いチャンクを破棄して再試行
+            if (_buffer.TryTake(out var dropped))
+            {
+                Interlocked.Add(ref _droppedBytes, dropped.Length);
+                if (Interlocked.Read(ref _droppedBytes) % (dropped.Length * 100) < dropped.Length)
+                {
+                    AppLogger.Warn($"[SpeechAudioStream] バッファ溢れ: 古いデータを破棄 (累計: {Interlocked.Read(ref _droppedBytes) / 1024}KB)");
+                }
+            }
+            _buffer.TryAdd(data);
+        }
     }
 
     /// <summary>

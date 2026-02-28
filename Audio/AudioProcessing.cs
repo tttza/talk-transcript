@@ -19,6 +19,8 @@ internal static class AudioProcessing
     ///
     /// 単純デシメーション (間引き) ではなくリニア補間を使用し、
     /// エイリアシングアーティファクトを低減する。
+    ///
+    /// 入力・出力ともに ArrayPool を使用し、コールバック内での GC 圧力を最小化する。
     /// </summary>
     public static byte[] ConvertLoopbackToTarget(
         byte[] source, int length, WaveFormat sourceFormat, WaveFormat targetFormat)
@@ -50,24 +52,35 @@ internal static class AudioProcessing
             int outputSamples = (int)(sampleCount / ratio);
             if (outputSamples == 0) return Array.Empty<byte>();
 
-            byte[] result = new byte[outputSamples * 2]; // 16bit = 2 bytes
-
-            for (int i = 0; i < outputSamples; i++)
+            int resultLength = outputSamples * 2; // 16bit = 2 bytes
+            byte[] result = ArrayPool<byte>.Shared.Rent(resultLength);
+            try
             {
-                // リニア補間で滑らかにリサンプル
-                double srcPos = i * ratio;
-                int idx0 = (int)srcPos;
-                int idx1 = Math.Min(idx0 + 1, sampleCount - 1);
-                float frac = (float)(srcPos - idx0);
+                for (int i = 0; i < outputSamples; i++)
+                {
+                    // リニア補間で滑らかにリサンプル
+                    double srcPos = i * ratio;
+                    int idx0 = (int)srcPos;
+                    int idx1 = Math.Min(idx0 + 1, sampleCount - 1);
+                    float frac = (float)(srcPos - idx0);
 
-                float sample = monoSamples[idx0] * (1f - frac) + monoSamples[idx1] * frac;
-                short pcm = (short)(Math.Clamp(sample, -1.0f, 1.0f) * 32767);
+                    float sample = monoSamples[idx0] * (1f - frac) + monoSamples[idx1] * frac;
+                    short pcm = (short)(Math.Clamp(sample, -1.0f, 1.0f) * 32767);
 
-                result[i * 2] = (byte)(pcm & 0xFF);
-                result[i * 2 + 1] = (byte)((pcm >> 8) & 0xFF);
+                    result[i * 2] = (byte)(pcm & 0xFF);
+                    result[i * 2 + 1] = (byte)((pcm >> 8) & 0xFF);
+                }
+
+                // ArrayPool のバッファは要求より大きい場合があるので、
+                // 正確なサイズでコピーを返す
+                byte[] output = new byte[resultLength];
+                Buffer.BlockCopy(result, 0, output, 0, resultLength);
+                return output;
             }
-
-            return result;
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(result);
+            }
         }
         finally
         {

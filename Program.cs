@@ -382,29 +382,30 @@ AppLogger.Close();
 void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
                        TranscriptWriter w, string fp, DateTime callStart, string lang)
 {
-    var micPcm = transcriber.GetMicRecording();
-    var spkPcm = transcriber.GetSpeakerRecording();
-
-    // ── 録音保存 ──
+    // ── 録音保存 (ストリーミング方式: byte[] にせずチャンクを順次書き出す) ──
     if (settings.SaveRecording)
     {
-        SaveRecordingToWav(micPcm, spkPcm, fp);
+        SaveRecordingToWav(transcriber, fp);
     }
 
     string? whisperPostModelPath = whisperSize != null
         ? null
         : (ModelManager.GetWhisperModelPath("base") ?? ModelManager.GetWhisperModelPath("tiny"));
-    bool hasRecording = micPcm.Length > 0 || spkPcm.Length > 0;
+    bool hasRecording = transcriber.MicRecordingLength > 0 || transcriber.SpeakerRecordingLength > 0;
 
     if (whisperPostModelPath != null && hasRecording)
     {
         // 録音が短すぎる場合はスキップ (16kHz/16bit/mono = 32KB/秒)
         long minBytes = 32_000 * 2; // 最低2秒
-        if (micPcm.Length < minBytes && spkPcm.Length < minBytes)
+        if (transcriber.MicRecordingLength < minBytes && transcriber.SpeakerRecordingLength < minBytes)
         {
             AnsiConsole.MarkupLine("  [dim](録音が短すぎるため後処理スキップ)[/]");
             return;
         }
+
+        // Whisper 後処理用にのみ byte[] をロード (一時的なメモリ消費)
+        var micPcm = transcriber.GetMicRecording();
+        var spkPcm = transcriber.GetSpeakerRecording();
 
         AnsiConsole.MarkupLine("  [dim]Whisper 後処理を実行中...[/]");
         try
@@ -435,31 +436,29 @@ void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
 }
 
 /// <summary>
-/// 録音データ (16kHz/16bit/mono PCM) を WAV ファイルとして保存する。
-/// ファイルはトランスクリプトと同じディレクトリに保存される。
+/// 録音データを WAV ファイルとして保存する (ストリーミング方式)。
+/// RecordingBuffer のチャンクを順次書き出すため、全体を byte[] にしない。
 /// </summary>
-void SaveRecordingToWav(byte[] micPcm, byte[] spkPcm, string transcriptPath)
+void SaveRecordingToWav(ICallTranscriber transcriber, string transcriptPath)
 {
-    if (micPcm.Length == 0 && spkPcm.Length == 0) return;
+    if (transcriber.MicRecordingLength == 0 && transcriber.SpeakerRecordingLength == 0) return;
 
     string dir = Path.GetDirectoryName(transcriptPath) ?? ".";
     string baseName = Path.GetFileNameWithoutExtension(transcriptPath);
 
     try
     {
-        if (micPcm.Length > 0)
+        if (transcriber.MicRecordingLength > 0)
         {
             string micPath = Path.Combine(dir, $"{baseName}_mic.wav");
-            using var fs = File.Create(micPath);
-            AudioProcessing.WriteWavPcm16(fs, micPcm, 16000);
+            transcriber.SaveMicRecordingAsWav(micPath);
             AnsiConsole.MarkupLine($"  [green]✓[/] マイク録音: [white]{Markup.Escape(micPath)}[/]");
         }
 
-        if (spkPcm.Length > 0)
+        if (transcriber.SpeakerRecordingLength > 0)
         {
             string spkPath = Path.Combine(dir, $"{baseName}_speaker.wav");
-            using var fs = File.Create(spkPath);
-            AudioProcessing.WriteWavPcm16(fs, spkPcm, 16000);
+            transcriber.SaveSpeakerRecordingAsWav(spkPath);
             AnsiConsole.MarkupLine($"  [green]✓[/] スピーカー録音: [white]{Markup.Escape(spkPath)}[/]");
         }
     }

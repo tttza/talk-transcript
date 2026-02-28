@@ -265,12 +265,17 @@ internal sealed class SpectreUI
     private static string BuildVolumeBar(string icon, float peak, string color)
     {
         const int barWidth = 15;
-        // ピーク値を 0-1 に正規化 (16bit PCM の最大値 = 32767)
-        float normalized = Math.Clamp(peak / 32767f, 0f, 1f);
+        const float dbMin = -48f;  // バー下限 (これ以下は空表示)
+        const float dbMax = 0f;    // バー上限 (フルスケール)
+
+        // dB 計算 (対数スケール — 人の聴覚特性に合致)
+        float db = peak > 0 ? 20f * MathF.Log10(peak / 32767f) : -60f;
+
+        // dB を 0-1 に正規化してバー表示 (対数スケール)
+        float normalized = Math.Clamp((db - dbMin) / (dbMax - dbMin), 0f, 1f);
         int filled = (int)(normalized * barWidth);
 
         // dB 表示 (固定幅 5 文字に揃えてチラつき防止)
-        float db = peak > 0 ? 20f * MathF.Log10(peak / 32767f) : -60f;
         string dbStr = db > -60f ? $"{db:F0}dB".PadLeft(5) : " --- ";
 
         string bar = new string('█', filled) + new string('░', barWidth - filled);
