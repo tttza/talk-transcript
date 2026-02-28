@@ -88,7 +88,7 @@ internal static class ConfigMenu
 
         table.AddRow("エンジン", Markup.Escape(settings.EngineName ?? "(自動)"));
         table.AddRow("GPU", settings.UseGpu ? "[green]有効[/]" : "[yellow]無効[/]");
-        table.AddRow("言語", Markup.Escape(settings.Language ?? "ja (日本語)"));
+        table.AddRow("言語", Markup.Escape(FormatLanguageDisplay(settings.Language)));
         table.AddRow("出力ディレクトリ", Markup.Escape(settings.OutputDirectory ?? "(デフォルト)"));
 
         string formats = settings.OutputFormats?.Count > 0
@@ -134,27 +134,46 @@ internal static class ConfigMenu
         AnsiConsole.WriteLine();
     }
 
+    /// <summary>言語コードと表示名の対応表</summary>
+    private static readonly (string Code, string Name)[] LanguageList =
+    {
+        ("ja", "日本語"),
+        ("en", "English"),
+        ("zh", "中文"),
+        ("ko", "한국어"),
+        ("fr", "Français"),
+        ("de", "Deutsch"),
+        ("es", "Español"),
+    };
+
     private static void ConfigureLanguage(AppSettings settings)
     {
-        var languages = new[]
-        {
-            ("ja", "日本語"),
-            ("en", "English"),
-            ("zh", "中文"),
-            ("ko", "한국어"),
-            ("auto", "自動検出 (Whisper のみ)")
-        };
+        var choices = LanguageList.Select(l => $"{l.Code} - {l.Name}").ToList();
+        choices.Add("auto - 自動検出 (Whisper のみ)");
 
         var choice = AnsiConsole.Prompt(
             new SelectionPrompt<string>()
                 .Title("[cyan]  言語を選択:[/]")
-                .AddChoices(languages.Select(l => $"{l.Item1} - {l.Item2}")));
+                .AddChoices(choices));
 
         string langCode = choice.Split(' ')[0];
         settings.Language = langCode;
         settings.Save();
         AnsiConsole.MarkupLine($"  [green]→ {choice}[/]");
         AnsiConsole.WriteLine();
+    }
+
+    /// <summary>言語設定の表示用文字列を生成する。</summary>
+    internal static string FormatLanguageDisplay(string? language)
+    {
+        if (string.IsNullOrEmpty(language)) return "ja (日本語)";
+        if (language == "auto") return "auto (自動検出)";
+
+        var codes = language.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var dict = LanguageList.ToDictionary(l => l.Code, l => l.Name, StringComparer.OrdinalIgnoreCase);
+
+        var parts = codes.Select(c => dict.TryGetValue(c, out var name) ? $"{c} ({name})" : c);
+        return string.Join(", ", parts);
     }
 
     private static void ConfigureOutputDirectory(AppSettings settings)

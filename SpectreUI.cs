@@ -269,9 +269,9 @@ internal sealed class SpectreUI
         float normalized = Math.Clamp(peak / 32767f, 0f, 1f);
         int filled = (int)(normalized * barWidth);
 
-        // dB 表示
+        // dB 表示 (固定幅 5 文字に揃えてチラつき防止)
         float db = peak > 0 ? 20f * MathF.Log10(peak / 32767f) : -60f;
-        string dbStr = db > -60f ? $"{db:F0}dB" : "---";
+        string dbStr = db > -60f ? $"{db:F0}dB".PadLeft(5) : " --- ";
 
         string bar = new string('█', filled) + new string('░', barWidth - filled);
         return $"{icon} [{color}]{bar}[/] [dim]{dbStr}[/]";

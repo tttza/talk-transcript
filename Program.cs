@@ -107,7 +107,7 @@ else if (!string.IsNullOrEmpty(settings.Language))
 {
     language = settings.Language;
 }
-AppLogger.Info($"認識言語: {language}");
+AppLogger.Info($"認識言語: {ConfigMenu.FormatLanguageDisplay(language)}");
 
 // ── 出力フォーマット設定 (#1) ──
 var extraFormats = EngineSelector.ParseFormats(args);
