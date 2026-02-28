@@ -204,7 +204,10 @@ internal static class ConfigMenu
             : "テキスト (.txt) のみ";
         table.AddRow("出力フォーマット", Markup.Escape(formats));
 
-        table.AddRow("録音保存", settings.SaveRecording ? "[green]有効[/]" : "[dim]無効[/]");
+        string recLabel = settings.SaveRecording
+            ? (settings.SaveMicOnly ? "[green]有効 (マイクのみ)[/]" : "[green]有効[/]")
+            : "[dim]無効[/]";
+        table.AddRow("録音保存", recLabel);
 
         string threadDisplay = settings.MaxCpuThreads > 0
             ? $"{settings.MaxCpuThreads} スレッド"
@@ -363,8 +366,19 @@ internal static class ConfigMenu
     private static void ConfigureRecording(AppSettings settings)
     {
         settings.SaveRecording = AnsiConsole.Confirm("  録音データを WAV ファイルとして保存しますか?", settings.SaveRecording);
+        if (settings.SaveRecording)
+        {
+            settings.SaveMicOnly = AnsiConsole.Confirm("  マイクのみ保存しますか? (スピーカー録音を除外)", settings.SaveMicOnly);
+        }
+        else
+        {
+            settings.SaveMicOnly = false;
+        }
         settings.Save();
-        AnsiConsole.MarkupLine($"  [green]→ 録音保存: {(settings.SaveRecording ? "有効" : "無効")}[/]");
+        string detail = settings.SaveRecording
+            ? (settings.SaveMicOnly ? "有効 (マイクのみ)" : "有効 (マイク+スピーカー)")
+            : "無効";
+        AnsiConsole.MarkupLine($"  [green]→ 録音保存: {detail}[/]");
         AnsiConsole.WriteLine();
     }
 

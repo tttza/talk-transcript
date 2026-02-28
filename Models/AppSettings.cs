@@ -36,6 +36,9 @@ public class AppSettings
     /// <summary>録音データを WAV ファイルとして保存するか</summary>
     public bool SaveRecording { get; set; } = false;
 
+    /// <summary>マイクのみ録音を保存するか (true の場合スピーカー録音をファイルに残さない)</summary>
+    public bool SaveMicOnly { get; set; } = false;
+
     /// <summary>
     /// Whisper 推論に使用する最大 CPU スレッド数。
     /// 0 = 自動 (CPU コア数 - 4、最低 1)。

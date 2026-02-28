@@ -474,7 +474,7 @@ void SaveRecordingToWav(ICallTranscriber transcriber, string transcriptPath)
             AnsiConsole.MarkupLine($"  [green]✓[/] マイク録音: [white]{Markup.Escape(micPath)}[/]");
         }
 
-        if (transcriber.SpeakerRecordingLength > 0)
+        if (!settings.SaveMicOnly && transcriber.SpeakerRecordingLength > 0)
         {
             string spkPath = Path.Combine(dir, $"{baseName}_speaker.wav");
             transcriber.SaveSpeakerRecordingAsWav(spkPath);
