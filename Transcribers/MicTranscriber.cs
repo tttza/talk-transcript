@@ -27,7 +27,7 @@ public sealed class MicTranscriber : IDisposable
     private bool _recognizerStarted;
     private volatile bool _stopping;
     private int _dataChunksReceived;
-    private int _totalBytesWritten;
+    private long _totalBytesWritten;
 
     /// <summary>認識エンジンが期待するフォーマット: 16 kHz / 16 bit / mono</summary>
     private static readonly WaveFormat TargetFormat = new(16000, 16, 1);
@@ -123,7 +123,7 @@ public sealed class MicTranscriber : IDisposable
         if (e.BytesRecorded == 0) return;
 
         _audioStream.Write(e.Buffer, 0, e.BytesRecorded);
-        _totalBytesWritten += e.BytesRecorded;
+        Interlocked.Add(ref _totalBytesWritten, e.BytesRecorded);
         _dataChunksReceived++;
 
         // 最初の数チャンクの音量をログ出力
@@ -202,7 +202,7 @@ public sealed class MicTranscriber : IDisposable
         if (_stopping) return;
         _stopping = true;
 
-        Console.WriteLine($"[マイク] 停止中... (書き込みバイト: {_totalBytesWritten:N0})");
+        Console.WriteLine($"[マイク] 停止中... (書き込みバイト: {Interlocked.Read(ref _totalBytesWritten):N0})");
 
         // 先にストリームを完了させて Read がブロックしないようにする
         _audioStream.Complete();

@@ -68,8 +68,8 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     // ── 統計 ──
     private int _micChunks;
     private int _speakerChunks;
-    private int _micWritten;
-    private int _speakerWritten;
+    private long _micWritten;
+    private long _speakerWritten;
     private WaveFormat? _loopbackFormat;
 
     /// <summary>認識済みの全エントリ (スレッドセーフなコピーを返す)</summary>
@@ -214,7 +214,7 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         if (_micActive)
         {
             _audioStream.Write(e.Buffer, 0, e.BytesRecorded);
-            _micWritten += e.BytesRecorded;
+            Interlocked.Add(ref _micWritten, e.BytesRecorded);
         }
 
         // エンジン開始 (初回のみ)
@@ -261,7 +261,7 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         if (!_micActive)
         {
             _audioStream.Write(converted, 0, converted.Length);
-            _speakerWritten += converted.Length;
+            Interlocked.Add(ref _speakerWritten, converted.Length);
         }
     }
 
@@ -360,7 +360,7 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         if (_stopping || _disposed) return;
         _stopping = true;
 
-        Console.WriteLine($"[通話] 停止中... (マイク書込: {_micWritten:N0}, スピーカー書込: {_speakerWritten:N0})");
+        Console.WriteLine($"[通話] 停止中... (マイク書込: {Interlocked.Read(ref _micWritten):N0}, スピーカー書込: {Interlocked.Read(ref _speakerWritten):N0})");
 
         try { _audioStream.Complete(); } catch { }
         try { _micCapture.StopRecording(); } catch { }

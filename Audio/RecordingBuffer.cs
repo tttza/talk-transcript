@@ -84,8 +84,19 @@ internal sealed class RecordingBuffer : IDisposable
             if (_streaming && _streamingFile != null)
             {
                 // ストリーミングモード: ディスクに直接書き出す (メモリ上限なし)
-                _streamingFile.Write(buffer, srcOffset, remaining);
-                _totalBytes += remaining;
+                try
+                {
+                    _streamingFile.Write(buffer, srcOffset, remaining);
+                    _totalBytes += remaining;
+                }
+                catch (IOException ex)
+                {
+                    // ディスク容量不足等 — ストリーミングを停止してメモリモードにフォールバック
+                    Logging.AppLogger.Error("[RecordingBuffer] ストリーミング書き込みエラー、ストリーミングを停止", ex);
+                    try { _streamingFile.Dispose(); } catch { }
+                    _streamingFile = null;
+                    _streaming = false;
+                }
                 return;
             }
 

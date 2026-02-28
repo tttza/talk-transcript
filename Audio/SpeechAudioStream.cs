@@ -103,18 +103,29 @@ public sealed class SpeechAudioStream : Stream
         var data = new byte[count];
         Buffer.BlockCopy(buffer, offset, data, 0, count);
 
-        if (!_buffer.TryAdd(data, TimeSpan.FromMilliseconds(50)))
+        try
         {
-            // バッファが満杯 → 最も古いチャンクを破棄して再試行
-            if (_buffer.TryTake(out var dropped))
+            if (!_buffer.TryAdd(data, TimeSpan.FromMilliseconds(50)))
             {
-                Interlocked.Add(ref _droppedBytes, dropped.Length);
-                if (Interlocked.Read(ref _droppedBytes) % (dropped.Length * 100) < dropped.Length)
+                // バッファが満杯 → 最も古いチャンクを破棄して再試行
+                if (_buffer.TryTake(out var dropped))
                 {
-                    AppLogger.Warn($"[SpeechAudioStream] バッファ溢れ: 古いデータを破棄 (累計: {Interlocked.Read(ref _droppedBytes) / 1024}KB)");
+                    Interlocked.Add(ref _droppedBytes, dropped.Length);
+                    if (Interlocked.Read(ref _droppedBytes) % (dropped.Length * 100) < dropped.Length)
+                    {
+                        AppLogger.Warn($"[SpeechAudioStream] バッファ溢れ: 古いデータを破棄 (累計: {Interlocked.Read(ref _droppedBytes) / 1024}KB)");
+                    }
                 }
+                _buffer.TryAdd(data);
             }
-            _buffer.TryAdd(data);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Dispose 済み — 安全に無視
+        }
+        catch (InvalidOperationException)
+        {
+            // Complete() による CompleteAdding() と競合した場合 — 安全に無視
         }
     }
 

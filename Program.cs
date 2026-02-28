@@ -271,7 +271,8 @@ while (!quit)
         writer?.Append(entry);
         jsonWriter?.Append(entry);
         allEntries.Add(entry);
-        if (entry.Speaker == "自分") { sessionMic++; totalMicCount++; }
+        if (entry.IsBookmark) { /* ブックマークはカウントしない */ }
+        else if (entry.Speaker == "自分") { sessionMic++; totalMicCount++; }
         else { sessionSpk++; totalSpkCount++; }
     }
 

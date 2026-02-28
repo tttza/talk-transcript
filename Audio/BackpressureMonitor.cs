@@ -26,7 +26,7 @@ internal sealed class BackpressureMonitor
     public int ConsecutiveSlowChunks => _consecutiveSlowChunks;
 
     /// <summary>バッファオーバーフローにより破棄した総バイト数</summary>
-    public long TotalDroppedBytes => _totalDroppedBytes;
+    public long TotalDroppedBytes => Interlocked.Read(ref _totalDroppedBytes);
 
     /// <summary>古いオーディオを破棄すべき状態か (連続3チャンク以上遅延)</summary>
     public bool ShouldDropOldAudio => _consecutiveSlowChunks >= 3;
@@ -84,7 +84,7 @@ internal sealed class BackpressureMonitor
     /// </summary>
     public void ReportDropped(long droppedBytes)
     {
-        _totalDroppedBytes += droppedBytes;
+        Interlocked.Add(ref _totalDroppedBytes, droppedBytes);
     }
 
     /// <summary>

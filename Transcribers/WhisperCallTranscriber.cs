@@ -271,7 +271,9 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 long dropped = _micBuffer.Length;
                 int keep = (int)(capacity / 2);
                 keep = keep - (keep % 2); // サンプル境界 (16bit=2bytes) にアライン
-                byte[] tail = _micBuffer.ToArray()[(int)(_micBuffer.Length - keep)..];
+                byte[] tail = new byte[keep];
+                _micBuffer.Position = _micBuffer.Length - keep;
+                _micBuffer.Read(tail, 0, keep);
                 _micBuffer.SetLength(0);
                 _micBuffer.Write(tail, 0, tail.Length);
                 _micBackpressure.ReportDropped(dropped - keep);
@@ -330,7 +332,9 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 long dropped = _speakerBuffer.Length;
                 int keep = (int)(capacity / 2);
                 keep = keep - (keep % 2); // サンプル境界 (16bit=2bytes) にアライン
-                byte[] tail = _speakerBuffer.ToArray()[(int)(_speakerBuffer.Length - keep)..];
+                byte[] tail = new byte[keep];
+                _speakerBuffer.Position = _speakerBuffer.Length - keep;
+                _speakerBuffer.Read(tail, 0, keep);
                 _speakerBuffer.SetLength(0);
                 _speakerBuffer.Write(tail, 0, tail.Length);
                 _spkBackpressure.ReportDropped(dropped - keep);
@@ -373,6 +377,8 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         Func<byte[]?> getOverlap,
         Action<byte[]?> setOverlap)
     {
+      try
+      {
         while (!_stopping)
         {
             Thread.Sleep(200); // ポーリング間隔
@@ -506,6 +512,11 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             string lastText = getLastText();
             ProcessChunk(remaining, speaker, prompt, lastText);
         }
+      }
+      catch (Exception ex)
+      {
+          AppLogger.Error($"[Whisper] {speaker} 処理スレッドで例外が発生", ex);
+      }
     }
 
     /// <summary>PCM 16bit チャンクを Whisper で認識する。認識テキストを返す。</summary>
@@ -630,9 +641,9 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         try { _micCapture.StopRecording(); } catch { }
         try { _speakerCapture.StopRecording(); } catch { }
 
-        // 認識スレッドの完了を待つ
-        _micProcessThread?.Join(TimeSpan.FromSeconds(15));
-        _spkProcessThread?.Join(TimeSpan.FromSeconds(15));
+        // 認識スレッドの完了を待つ (Whisper 推論が重い場合に備え十分な待ち時間を設ける)
+        _micProcessThread?.Join(TimeSpan.FromSeconds(30));
+        _spkProcessThread?.Join(TimeSpan.FromSeconds(30));
     }
 
     public byte[] GetMicRecording() => _micRecording.ToArray();
@@ -681,6 +692,14 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
         _micCapture.Dispose();
         _speakerCapture.Dispose();
+
+        // 処理スレッドが確実に終了してから factory を破棄する
+        // (スレッドがまだ Whisper 推論中の場合、factory.Dispose() で use-after-free になる)
+        if (_micProcessThread?.IsAlive == true)
+            _micProcessThread.Join(TimeSpan.FromSeconds(10));
+        if (_spkProcessThread?.IsAlive == true)
+            _spkProcessThread.Join(TimeSpan.FromSeconds(10));
+
         _factory.Dispose();
 
         // 認識バッファを確実に解放

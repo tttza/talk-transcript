@@ -230,44 +230,58 @@ public sealed class VoskCallTranscriber : ICallTranscriber
     // ────────────────────────────────────────────────
     private void MicVoskLoop()
     {
-        while (!_stopping)
+        try
         {
-            if (_micQueue.TryDequeue(out var data))
+            while (!_stopping)
             {
-                if (_micRecognizer != null && _micRecognizer.AcceptWaveform(data, data.Length))
-                    ProcessResult(_micRecognizer.Result(), "自分");
+                if (_micQueue.TryDequeue(out var data))
+                {
+                    if (_micRecognizer != null && _micRecognizer.AcceptWaveform(data, data.Length))
+                        ProcessResult(_micRecognizer.Result(), "自分");
+                }
+                else
+                {
+                    Thread.Sleep(10);
+                }
             }
-            else
+            // 停止時: キューに残ったデータを処理
+            while (_micQueue.TryDequeue(out var remaining))
             {
-                Thread.Sleep(10);
+                if (_micRecognizer != null)
+                    _micRecognizer.AcceptWaveform(remaining, remaining.Length);
             }
         }
-        // 停止時: キューに残ったデータを処理
-        while (_micQueue.TryDequeue(out var remaining))
+        catch (Exception ex)
         {
-            if (_micRecognizer != null)
-                _micRecognizer.AcceptWaveform(remaining, remaining.Length);
+            AppLogger.Error("[Vosk] マイク処理スレッドで例外が発生", ex);
         }
     }
 
     private void SpkVoskLoop()
     {
-        while (!_stopping)
+        try
         {
-            if (_spkQueue.TryDequeue(out var data))
+            while (!_stopping)
             {
-                if (_speakerRecognizer != null && _speakerRecognizer.AcceptWaveform(data, data.Length))
-                    ProcessResult(_speakerRecognizer.Result(), "相手");
+                if (_spkQueue.TryDequeue(out var data))
+                {
+                    if (_speakerRecognizer != null && _speakerRecognizer.AcceptWaveform(data, data.Length))
+                        ProcessResult(_speakerRecognizer.Result(), "相手");
+                }
+                else
+                {
+                    Thread.Sleep(10);
+                }
             }
-            else
+            while (_spkQueue.TryDequeue(out var remaining))
             {
-                Thread.Sleep(10);
+                if (_speakerRecognizer != null)
+                    _speakerRecognizer.AcceptWaveform(remaining, remaining.Length);
             }
         }
-        while (_spkQueue.TryDequeue(out var remaining))
+        catch (Exception ex)
         {
-            if (_speakerRecognizer != null)
-                _speakerRecognizer.AcceptWaveform(remaining, remaining.Length);
+            AppLogger.Error("[Vosk] スピーカー処理スレッドで例外が発生", ex);
         }
     }
 

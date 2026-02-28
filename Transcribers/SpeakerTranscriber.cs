@@ -29,7 +29,7 @@ public sealed class SpeakerTranscriber : IDisposable
     private bool _recognizerStarted;
     private volatile bool _stopping;
     private int _dataChunksReceived;
-    private int _totalBytesWritten;
+    private long _totalBytesWritten;
 
     /// <summary>認識エンジンが期待するフォーマット: 16 kHz / 16 bit / mono</summary>
     private static readonly WaveFormat TargetFormat = new(16000, 16, 1);
@@ -129,7 +129,7 @@ public sealed class SpeakerTranscriber : IDisposable
             if (converted.Length > 0)
             {
                 _audioStream.Write(converted, 0, converted.Length);
-                _totalBytesWritten += converted.Length;
+                Interlocked.Add(ref _totalBytesWritten, converted.Length);
 
                 _dataChunksReceived++;
 
@@ -211,7 +211,7 @@ public sealed class SpeakerTranscriber : IDisposable
         if (_stopping) return;
         _stopping = true;
 
-        Console.WriteLine($"[スピーカー] 停止中... (変換済みバイト: {_totalBytesWritten:N0})");
+        Console.WriteLine($"[スピーカー] 停止中... (変換済みバイト: {Interlocked.Read(ref _totalBytesWritten):N0})");
 
         _audioStream.Complete();
         _loopback.StopRecording();
