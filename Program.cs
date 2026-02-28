@@ -345,7 +345,8 @@ while (!quit)
             }
             catch
             {
-                // デバイスが変更/削除された場合はそのまま
+                Console.WriteLine("前回のデバイスが見つかりません。選択してください。");
+                (micDevice, speakerDevice) = DeviceSelector.SelectDevices(settings);
             }
             Console.WriteLine();
             break;
