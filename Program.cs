@@ -1,9 +1,10 @@
 using TalkTranscript;
 using TalkTranscript.Audio;
+using TalkTranscript.Logging;
 using TalkTranscript.Models;
+using TalkTranscript.Output;
 using TalkTranscript.Transcribers;
 using System.Globalization;
-using System.Runtime.InteropServices;
 using System.Speech.Recognition;
 using Spectre.Console;
 using Vosk;
@@ -12,10 +13,12 @@ using Vosk;
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 Console.InputEncoding = System.Text.Encoding.UTF8;
 ConsoleHelper.SetFont("BIZ UDゴシック", 18);
+AppLogger.Initialize(AppLogger.LogLevel.Debug);
 
 bool testMode = args.Contains("--test");
 bool diagMode = args.Contains("--diag");
-bool whisperOnly = args.Contains("--whisper-only");  // Whisper後処理のみテスト
+bool whisperOnly = args.Contains("--whisper-only");
+bool configMode = args.Contains("--config");
 int testSeconds = 12;
 
 // エンジン選択: --engine 引数 > 設定ファイル > 環境推奨
@@ -51,10 +54,10 @@ if (engineName.StartsWith("whisper-"))
     whisperModelSize = engineName.Substring("whisper-".Length); // "tiny", "base" etc.
 
 // ── CUDA 利用可否チェック & ランタイムセットアップ ──
-bool cudaAvailable = IsCudaAvailable();
+bool cudaAvailable = CudaHelper.IsCudaAvailable();
 if (useGpu && cudaAvailable)
 {
-    SetupCudaRuntime();
+    CudaHelper.SetupRuntime();
 }
 else if (useGpu && !cudaAvailable)
 {
@@ -69,6 +72,15 @@ else if (useGpu && !cudaAvailable)
 if (diagMode)
 {
     RunDiagnostics();
+    AppLogger.Close();
+    return;
+}
+
+// ── 設定メニュー (#9) ──
+if (configMode)
+{
+    ConfigMenu.Show(hwProfile);
+    AppLogger.Close();
     return;
 }
 
@@ -89,6 +101,27 @@ if (whisperOnly)
 if (!testMode)
 {
     Console.TreatControlCAsInput = true;
+}
+
+// ── 言語設定 (#7) ──
+var appSettings = AppSettings.Load();
+string language = "ja"; // デフォルト
+int langIdx = Array.IndexOf(args, "--lang");
+if (langIdx >= 0 && langIdx + 1 < args.Length)
+{
+    language = args[langIdx + 1].ToLowerInvariant();
+}
+else if (!string.IsNullOrEmpty(appSettings.Language))
+{
+    language = appSettings.Language;
+}
+AppLogger.Info($"認識言語: {language}");
+
+// ── 出力フォーマット設定 (#1) ──
+var extraFormats = EngineSelector.ParseFormats(args);
+if (extraFormats.Count == 0 && appSettings.OutputFormats?.Count > 0)
+{
+    extraFormats = appSettings.OutputFormats;
 }
 
 // ── デバイス読み込み ──
@@ -116,8 +149,16 @@ else
     (micDevice, speakerDevice) = DeviceSelector.SelectDevices(settings);
 }
 
-// ── ファイル出力準備 (セッション全体で1ファイル) ──
-var outputDir = Path.Combine(AppContext.BaseDirectory, "Transcripts");
+// ── ファイル出力準備 (セッション全体で1ファイル) (#5) ──
+string outputDir;
+if (!string.IsNullOrEmpty(settings.OutputDirectory))
+{
+    outputDir = settings.OutputDirectory;
+}
+else
+{
+    outputDir = Path.Combine(AppContext.BaseDirectory, "Transcripts");
+}
 Directory.CreateDirectory(outputDir);
 var fileName = $"transcript_{DateTime.Now:yyyyMMdd_HHmmss}.txt";
 var filePath = Path.Combine(outputDir, fileName);
@@ -133,26 +174,19 @@ bool quit = false;
 ICallTranscriber? lastTranscriber = null;
 
 // ── ×ボタン / プロセス終了時の安全なシャットダウン ──
-AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+int _cleanedUp = 0; // 0=未, 1=済 (Interlockedでアトミックに制御)
+void EmergencyCleanup()
 {
-    try
-    {
-        lastTranscriber?.Stop();
-        lastTranscriber?.Dispose();
-        writer.Close();
-    }
-    catch { }
-};
+    if (Interlocked.Exchange(ref _cleanedUp, 1) != 0) return;
+    try { lastTranscriber?.Stop(); } catch { }
+    try { lastTranscriber?.Dispose(); } catch { }
+    try { writer.Close(); } catch { }
+}
+AppDomain.CurrentDomain.ProcessExit += (_, _) => EmergencyCleanup();
 Console.CancelKeyPress += (_, e) =>
 {
-    e.Cancel = true; // プロセスを即死させない
-    try
-    {
-        lastTranscriber?.Stop();
-        lastTranscriber?.Dispose();
-        writer.Close();
-    }
-    catch { }
+    e.Cancel = true;
+    EmergencyCleanup();
     Environment.Exit(0);
 };
 
@@ -177,7 +211,7 @@ while (!quit)
     if (whisperModelSize != null)
     {
         string wModelPath = await ModelManager.EnsureWhisperModelAsync(whisperModelSize);
-        callTranscriber = new WhisperCallTranscriber(wModelPath, whisperModelSize, micDevice, speakerDevice, useGpu);
+        callTranscriber = new WhisperCallTranscriber(wModelPath, whisperModelSize, micDevice, speakerDevice, useGpu, language);
     }
     else if (engineName == "vosk")
     {
@@ -188,7 +222,8 @@ while (!quit)
     }
     else
     {
-        callTranscriber = new SapiCallTranscriber(micDevice, speakerDevice, "ja-JP");
+        string sapiCulture = language == "auto" ? "ja-JP" : (language + (language.Contains('-') ? "" : language == "ja" ? "-JP" : language == "en" ? "-US" : ""));
+        callTranscriber = new SapiCallTranscriber(micDevice, speakerDevice, sapiCulture);
     }
 
     lastTranscriber = callTranscriber;
@@ -209,6 +244,22 @@ while (!quit)
 
     callTranscriber.OnTranscribed += OnTranscribed;
 
+    // ── 音量通知 (#2) ──
+    callTranscriber.OnVolumeUpdated += (mic, spk) => ui.UpdateVolume(mic, spk);
+
+    // ── ブックマーク (#3) ──
+    ui.OnBookmarkRequested += () =>
+    {
+        var bookmark = new TranscriptEntry(
+            Timestamp: DateTime.Now,
+            Speaker: "📌",
+            Text: "ブックマーク",
+            IsBookmark: true);
+        ui.AddEntry(bookmark);
+        writer.Append(bookmark);
+        AppLogger.Info("ブックマークを追加しました");
+    };
+
     // ── Whisper 処理中通知 ──
     if (callTranscriber is WhisperCallTranscriber wt)
     {
@@ -219,12 +270,29 @@ while (!quit)
     try
     {
         callTranscriber.Start();
+        AppLogger.Info($"音声認識開始 (エンジン: {engineName}, GPU: {useGpu})");
     }
     catch (Exception ex)
     {
+        AppLogger.Error("音声認識の開始に失敗", ex);
         AnsiConsole.MarkupLine($"  [red]音声認識の開始に失敗しました: {Markup.Escape(ex.Message)}[/]");
-        callTranscriber.Dispose();
-        return;
+
+        // 自動リトライ (#10)
+        AnsiConsole.MarkupLine("  [yellow]2秒後にリトライします...[/]");
+        Thread.Sleep(2000);
+        try
+        {
+            callTranscriber.Start();
+            AppLogger.Info("リトライ成功");
+        }
+        catch (Exception retryEx)
+        {
+            AppLogger.Error("リトライも失敗", retryEx);
+            AnsiConsole.MarkupLine($"  [red]リトライも失敗しました: {Markup.Escape(retryEx.Message)}[/]");
+            callTranscriber.Dispose();
+            AppLogger.Close();
+            return;
+        }
     }
 
     // ── タイトルバー ──
@@ -248,7 +316,7 @@ while (!quit)
     {
         case "quit":
             // Whisper 後処理
-            RunPostProcessing(callTranscriber, whisperModelSize, writer, filePath, overallStart);
+            RunPostProcessing(callTranscriber, whisperModelSize, writer, filePath, overallStart, language);
             quit = true;
             break;
 
@@ -262,7 +330,7 @@ while (!quit)
         case "engine":
             callTranscriber.Dispose();
             SpectreUI.PrintSectionHeader("エンジン変更");
-            var newEngine = SelectEngineMenu(engineName);
+            var newEngine = EngineSelector.SelectEngine(engineName, hwProfile);
             if (newEngine != null)
             {
                 engineName = newEngine;
@@ -302,105 +370,28 @@ while (!quit)
 writer.Close();
 SpectreUI.PrintSummary(filePath, totalMicCount, totalSpkCount, DateTime.Now - overallStart);
 
+// ── 追加フォーマットでエクスポート (#1) ──
+if (extraFormats.Count > 0)
+{
+    var allEntries = lastTranscriber?.Entries ?? Array.Empty<TranscriptEntry>();
+    var exported = TranscriptExporter.Export(filePath, allEntries, extraFormats,
+        overallStart, DateTime.Now - overallStart, engineName, language);
+    foreach (var ep in exported)
+    {
+        AnsiConsole.MarkupLine($"  [green]✓[/] 追加出力: [white]{Markup.Escape(ep)}[/]");
+    }
+}
+
+AppLogger.Close();
+
 // ══════════════════════════════════════════════════
 //  ヘルパー関数
 // ══════════════════════════════════════════════════
 
-string? SelectEngineMenu(string currentEngine)
-{
-    var engines = new[]
-    {
-        ("vosk",           "Vosk",           "リアルタイム・オフライン"),
-        ("whisper-tiny",   "Whisper tiny",   "~39MB  準リアルタイム・高速"),
-        ("whisper-base",   "Whisper base",   "~142MB 準リアルタイム・標準"),
-        ("whisper-small",  "Whisper small",  "~466MB 準リアルタイム・高精度"),
-        ("whisper-medium", "Whisper medium", "~1.5GB 高精度"),
-        ("whisper-large",  "Whisper large",  "~3.1GB 最高精度"),
-        ("sapi",           "SAPI",           "Windows 標準")
-    };
-
-    // 環境情報表示
-    Console.ForegroundColor = ConsoleColor.DarkGray;
-    Console.Write("  環境: ");
-    Console.ForegroundColor = ConsoleColor.White;
-    if (hwProfile.HasNvidiaGpu)
-        Console.Write($"{hwProfile.GpuName} ({hwProfile.GpuVramMB / 1024}GB)");
-    else
-        Console.Write($"CPU {hwProfile.CpuCores}コア / RAM {hwProfile.SystemRamMB / 1024}GB");
-    Console.ResetColor();
-    Console.WriteLine();
-    Console.WriteLine();
-
-    Console.WriteLine("  エンジンを選択:");
-    Console.WriteLine();
-
-    for (int i = 0; i < engines.Length; i++)
-    {
-        var (id, label, desc) = engines[i];
-        bool isCurrent = id == currentEngine;
-        bool isRecommended = id == hwProfile.RecommendedEngine;
-        string rating = HardwareInfo.GetRecommendation(id, hwProfile);
-
-        // 番号
-        Console.ForegroundColor = isCurrent ? ConsoleColor.Green : ConsoleColor.Gray;
-        Console.Write($"  {i + 1}. ");
-
-        // 推奨マーク
-        if (rating == "★")
-            Console.ForegroundColor = ConsoleColor.Green;
-        else if (rating == "△")
-            Console.ForegroundColor = ConsoleColor.Yellow;
-        else if (rating == "✕")
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.Write($"{rating,-2}");
-
-        // ラベル
-        Console.ForegroundColor = isCurrent ? ConsoleColor.Green : ConsoleColor.White;
-        Console.Write($"{label,-16}");
-
-        // 説明
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.Write(desc);
-
-        // 現在 / 推奨タグ
-        if (isCurrent)
-        {
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.Write(" ← 現在");
-        }
-        else if (isRecommended)
-        {
-            Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.Write(" ← 推奨");
-        }
-
-        Console.ResetColor();
-        Console.WriteLine();
-    }
-
-    Console.WriteLine();
-    Console.Write($"  番号 [1-{engines.Length}] (Enter でキャンセル): ");
-
-    string? input = Console.ReadLine();
-    if (int.TryParse(input, out int choice) && choice >= 1 && choice <= engines.Length)
-    {
-        var (selId, selLabel, _) = engines[choice - 1];
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"  → {selLabel}");
-        Console.ResetColor();
-        return selId;
-    }
-    else
-    {
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.WriteLine("  キャンセルしました");
-        Console.ResetColor();
-        return null;
-    }
-}
+// SelectEngineMenu は EngineSelector.SelectEngine() に移行済み
 
 void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
-                       TranscriptWriter w, string fp, DateTime callStart)
+                       TranscriptWriter w, string fp, DateTime callStart, string lang)
 {
     var micPcm = transcriber.GetMicRecording();
     var spkPcm = transcriber.GetSpeakerRecording();
@@ -424,7 +415,7 @@ void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
         try
         {
             var whisperEntries = WhisperPostProcessor.ProcessAsync(
-                whisperPostModelPath, micPcm, spkPcm, callStart, useGpu).GetAwaiter().GetResult();
+                whisperPostModelPath, micPcm, spkPcm, callStart, useGpu, lang).GetAwaiter().GetResult();
             if (whisperEntries.Count > 0)
             {
                 w.Close();
@@ -438,6 +429,7 @@ void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
         }
         catch (Exception ex)
         {
+            AppLogger.Error("Whisper 後処理エラー", ex);
             AnsiConsole.MarkupLine($"  [yellow]Whisper 後処理エラー: {Markup.Escape(ex.Message)}[/]");
         }
     }
@@ -447,73 +439,7 @@ void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
     }
 }
 
-/// <summary>
-/// CUDA DLL (runtimes/cuda/win-x64/) と CUDA Toolkit (cublas64_13.dll) が
-/// 利用可能かチェック。コピー不要 — ランタイムで PATH + プリロードで解決。
-/// </summary>
-bool IsCudaAvailable()
-{
-    var exeDir = AppContext.BaseDirectory;
-    var cudaDir = Path.Combine(exeDir, "runtimes", "cuda", "win-x64");
-    if (!File.Exists(Path.Combine(cudaDir, "ggml-cuda-whisper.dll")))
-        return false;
-    return FindCudaToolkitBinDir() != null;
-}
-
-/// <summary>CUDA Toolkit の bin ディレクトリ (cublas64_13.dll が存在する場所) を検索</summary>
-string? FindCudaToolkitBinDir()
-{
-    var candidates = new List<string>();
-    var cudaPath = Environment.GetEnvironmentVariable("CUDA_PATH");
-    if (!string.IsNullOrEmpty(cudaPath))
-    {
-        candidates.Add(Path.Combine(cudaPath, "bin", "x64"));
-        candidates.Add(Path.Combine(cudaPath, "bin"));
-    }
-    // 既知のインストールパスを幅広く検索
-    foreach (var ver in new[] { "v13.1", "v13.0", "v12.6", "v12.5", "v12.4" })
-    {
-        candidates.Add($@"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\{ver}\bin\x64");
-        candidates.Add($@"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\{ver}\bin");
-    }
-    foreach (var dir in candidates)
-    {
-        if (File.Exists(Path.Combine(dir, "cublas64_13.dll")))
-            return dir;
-    }
-    return null;
-}
-
-/// <summary>
-/// CUDA DLL をプリロードして CPU 版より先にロードさせる。
-/// PATH に CUDA Toolkit ディレクトリを追加し、依存解決も可能にする。
-/// </summary>
-void SetupCudaRuntime()
-{
-    var exeDir = AppContext.BaseDirectory;
-    var cudaDir = Path.Combine(exeDir, "runtimes", "cuda", "win-x64");
-    var toolkitDir = FindCudaToolkitBinDir();
-
-    // PATH に CUDA ディレクトリを追加 (cublas64_13.dll, cublasLt64_13.dll 等の依存解決用)
-    var path = Environment.GetEnvironmentVariable("PATH") ?? "";
-    var newPaths = new List<string>();
-    if (Directory.Exists(cudaDir)) newPaths.Add(cudaDir);
-    if (toolkitDir != null) newPaths.Add(toolkitDir);
-    if (newPaths.Count > 0)
-        Environment.SetEnvironmentVariable("PATH", string.Join(";", newPaths) + ";" + path);
-
-    // CUDA 版 DLL をプリロード (依存順: base → cuda → whisper)
-    // Windows はモジュール名が既にロード済みなら同名の別 DLL をロードしない
-    foreach (var dll in new[] { "ggml-base-whisper.dll", "ggml-cpu-whisper.dll",
-                                "ggml-cuda-whisper.dll", "ggml-whisper.dll", "whisper.dll" })
-    {
-        var fullPath = Path.Combine(cudaDir, dll);
-        if (File.Exists(fullPath))
-        {
-            NativeLibrary.TryLoad(fullPath, out _);
-        }
-    }
-}
+// IsCudaAvailable / FindCudaToolkitBinDir / SetupCudaRuntime は CudaHelper に移行済み
 
 void RunDiagnostics()
 {

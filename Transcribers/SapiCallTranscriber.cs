@@ -4,6 +4,7 @@ using System.Speech.Recognition;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using TalkTranscript.Audio;
+using TalkTranscript.Logging;
 using TalkTranscript.Models;
 
 namespace TalkTranscript.Transcribers;
@@ -48,6 +49,8 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     /// <summary>アクティブソースが切り替わった最後のタイムスタンプ</summary>
     private long _lastSwitchTicks = Environment.TickCount64;
 
+    private volatile bool _stopping;
+
     // ── 定数 ──
     /// <summary>認識エンジンが期待するフォーマット: 16 kHz / 16 bit / mono</summary>
     private static readonly WaveFormat TargetFormat = new(16000, 16, 1);
@@ -83,8 +86,10 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         get { lock (_lock) return _entries.Where(e => e.Speaker == "相手").ToList(); }
     }
 
-    /// <summary>認識結果が得られたときに発火するイベント</summary>
     public event Action<TranscriptEntry>? OnTranscribed;
+
+    /// <summary>音量レベルが更新されたときに発火 (micPeak, speakerPeak)</summary>
+    public event Action<float, float>? OnVolumeUpdated;
 
     public SapiCallTranscriber(MMDevice micDevice, MMDevice speakerDevice, string culture = "ja-JP")
     {
@@ -92,7 +97,7 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         _audioStream = new SpeechAudioStream();
 
         // ── マイク: WaveInEvent (MME API) ──
-        int deviceNumber = FindWaveInDevice(micDevice);
+        int deviceNumber = DeviceHelper.FindWaveInDevice(micDevice, "通話");
         _micCapture = new WaveInEvent
         {
             DeviceNumber = deviceNumber,
@@ -104,39 +109,7 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         _speakerCapture = new WasapiLoopbackCapture(speakerDevice);
     }
 
-    /// <summary>
-    /// MMDevice の FriendlyName から WaveIn デバイス番号を検索する。
-    /// WaveIn の ProductName は最大31文字に切り詰められるため、前方一致で比較する。
-    /// </summary>
-    private static int FindWaveInDevice(MMDevice mmDevice)
-    {
-        string targetName = mmDevice.FriendlyName;
-
-        for (int i = 0; i < WaveIn.DeviceCount; i++)
-        {
-            var caps = WaveIn.GetCapabilities(i);
-            string prodName = caps.ProductName;
-
-            if (targetName.StartsWith(prodName, StringComparison.OrdinalIgnoreCase) ||
-                prodName.StartsWith(targetName[..Math.Min(targetName.Length, prodName.Length)],
-                                    StringComparison.OrdinalIgnoreCase))
-            {
-                Console.WriteLine($"[通話] WaveIn デバイス #{i}: {prodName} (マッチ)");
-                return i;
-            }
-        }
-
-        Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.WriteLine($"[通話] WaveIn デバイスが名前で一致しません。デフォルトを使用します。");
-        Console.WriteLine($"[通話] 検索名: {targetName}");
-        for (int i = 0; i < WaveIn.DeviceCount; i++)
-        {
-            var caps = WaveIn.GetCapabilities(i);
-            Console.WriteLine($"[通話]   #{i}: {caps.ProductName}");
-        }
-        Console.ResetColor();
-        return 0;
-    }
+    // FindWaveInDevice は DeviceHelper に統合済み
 
     /// <summary>
     /// マイク + スピーカーのキャプチャと音声認識を開始する。
@@ -216,6 +189,9 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         short maxSample = AudioProcessing.CalcPeak(e.Buffer, e.BytesRecorded);
         _micPeak = maxSample;
 
+        // 音量通知 (#2)
+        OnVolumeUpdated?.Invoke(_micPeak, _speakerPeak);
+
         // 初回ログ
         if (_micChunks <= 3)
             Console.WriteLine($"[通話] マイク chunk#{_micChunks}: {e.BytesRecorded} bytes, ピーク={maxSample}");
@@ -254,9 +230,11 @@ public sealed class SapiCallTranscriber : ICallTranscriber
 
         if (converted.Length == 0) return;
 
-        // ピーク計算 (変換後の16bit PCM)
         short maxSample = AudioProcessing.CalcPeak(converted, converted.Length);
         _speakerPeak = maxSample;
+
+        // 音量通知 (#2)
+        OnVolumeUpdated?.Invoke(_micPeak, _speakerPeak);
 
         // 初回ログ
         if (_speakerChunks <= 3)
@@ -376,11 +354,14 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     // ────────────────────────────────────────────────
     public void Stop()
     {
+        if (_stopping || _disposed) return;
+        _stopping = true;
+
         Console.WriteLine($"[通話] 停止中... (マイク書込: {_micWritten:N0}, スピーカー書込: {_speakerWritten:N0})");
 
-        _audioStream.Complete();
-        _micCapture.StopRecording();
-        _speakerCapture.StopRecording();
+        try { _audioStream.Complete(); } catch { }
+        try { _micCapture.StopRecording(); } catch { }
+        try { _speakerCapture.StopRecording(); } catch { }
 
         if (_recognizerStarted)
         {

@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using TalkTranscript.Output;
 
 namespace TalkTranscript.Models;
 
@@ -24,6 +26,16 @@ public class AppSettings
 
     /// <summary>Whisper で GPU を使用するか (CUDA ランタイム導入時のみ有効)</summary>
     public bool UseGpu { get; set; } = true;
+
+    /// <summary>認識言語 (ja / en / auto など。Whisper の言語パラメータ)</summary>
+    public string? Language { get; set; }
+
+    /// <summary>出力ディレクトリ (null の場合は既定の Transcripts/ を使用)</summary>
+    public string? OutputDirectory { get; set; }
+
+    /// <summary>追加の出力フォーマット (テキスト出力は常に行われる)</summary>
+    [JsonConverter(typeof(OutputFormatsConverter))]
+    public List<OutputFormat>? OutputFormats { get; set; }
 
     // ── 永続化 ──
 
@@ -76,6 +88,34 @@ public class AppSettings
         catch (Exception ex)
         {
             Console.WriteLine($"設定ファイルの保存に失敗しました: {ex.Message}");
+        }
+    }
+
+    /// <summary>OutputFormats の JSON 変換</summary>
+    private class OutputFormatsConverter : JsonConverter<List<OutputFormat>?>
+    {
+        public override List<OutputFormat>? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            if (reader.TokenType == JsonTokenType.Null) return null;
+            var list = new List<OutputFormat>();
+            if (reader.TokenType == JsonTokenType.StartArray)
+            {
+                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+                {
+                    var str = reader.GetString();
+                    if (str != null && Enum.TryParse<OutputFormat>(str, true, out var fmt))
+                        list.Add(fmt);
+                }
+            }
+            return list.Count > 0 ? list : null;
+        }
+
+        public override void Write(Utf8JsonWriter writer, List<OutputFormat>? value, JsonSerializerOptions options)
+        {
+            if (value == null || value.Count == 0) { writer.WriteNullValue(); return; }
+            writer.WriteStartArray();
+            foreach (var f in value) writer.WriteStringValue(f.ToString());
+            writer.WriteEndArray();
         }
     }
 }

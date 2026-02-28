@@ -49,7 +49,7 @@ public sealed class MicTranscriber : IDisposable
         _engine = new SpeechRecognitionEngine(new CultureInfo(culture));
         _audioStream = new SpeechAudioStream();
 
-        int deviceNumber = FindWaveInDevice(micDevice);
+        int deviceNumber = DeviceHelper.FindWaveInDevice(micDevice, "マイク");
         _capture = new WaveInEvent
         {
             DeviceNumber = deviceNumber,
@@ -58,41 +58,7 @@ public sealed class MicTranscriber : IDisposable
         };
     }
 
-    /// <summary>
-    /// MMDevice の FriendlyName から WaveIn デバイス番号を検索する。
-    /// WaveIn の ProductName は最大31文字に切り詰められるため、前方一致で比較する。
-    /// </summary>
-    private static int FindWaveInDevice(MMDevice mmDevice)
-    {
-        string targetName = mmDevice.FriendlyName;
-
-        for (int i = 0; i < WaveIn.DeviceCount; i++)
-        {
-            var caps = WaveIn.GetCapabilities(i);
-            string prodName = caps.ProductName;
-
-            // 前方一致 (ProductName は最大31文字に切り詰められる)
-            if (targetName.StartsWith(prodName, StringComparison.OrdinalIgnoreCase) ||
-                prodName.StartsWith(targetName[..Math.Min(targetName.Length, prodName.Length)],
-                                    StringComparison.OrdinalIgnoreCase))
-            {
-                Console.WriteLine($"[マイク] WaveIn デバイス #{i}: {prodName} (マッチ)");
-                return i;
-            }
-        }
-
-        // マッチしない場合: 全デバイスを表示してデフォルトを使う
-        Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.WriteLine($"[マイク] WaveIn デバイスが名前で一致しません。デフォルトを使用します。");
-        Console.WriteLine($"[マイク] 検索名: {targetName}");
-        for (int i = 0; i < WaveIn.DeviceCount; i++)
-        {
-            var caps = WaveIn.GetCapabilities(i);
-            Console.WriteLine($"[マイク]   #{i}: {caps.ProductName}");
-        }
-        Console.ResetColor();
-        return 0;
-    }
+    // FindWaveInDevice は DeviceHelper に統合済み
 
     /// <summary>
     /// マイクキャプチャと音声認識を開始する。

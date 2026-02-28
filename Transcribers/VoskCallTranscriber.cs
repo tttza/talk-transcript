@@ -2,6 +2,7 @@ using System.Text.Json;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using TalkTranscript.Audio;
+using TalkTranscript.Logging;
 using TalkTranscript.Models;
 using Vosk;
 
@@ -44,10 +45,16 @@ public sealed class VoskCallTranscriber : ICallTranscriber
     private bool _disposed;
     private volatile bool _stopping;
     private WaveFormat? _loopbackFormat;
+    private readonly object _micRecognizerLock = new();
+    private readonly object _speakerRecognizerLock = new();
 
     // ── 統計 ──
     private int _micChunks;
     private int _speakerChunks;
+
+    // ── 音量通知 (#2) ──
+    private volatile float _lastMicPeak;
+    private volatile float _lastSpkPeak;
 
     /// <summary>認識エンジンが期待するフォーマット: 16 kHz / 16 bit / mono</summary>
     private static readonly WaveFormat TargetFormat = new(16000, 16, 1);
@@ -69,6 +76,9 @@ public sealed class VoskCallTranscriber : ICallTranscriber
 
     public event Action<TranscriptEntry>? OnTranscribed;
 
+    /// <summary>音量レベルが更新されたときに発火 (micPeak, speakerPeak)</summary>
+    public event Action<float, float>? OnVolumeUpdated;
+
     /// <param name="ownsModel">true のとき Dispose 時に Model も破棄する</param>
     /// <param name="enableRecording">true で録音バッファを保持する (後処理用)</param>
     public VoskCallTranscriber(Model voskModel, MMDevice micDevice, MMDevice speakerDevice,
@@ -84,7 +94,7 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         }
 
         // ── マイク: WaveInEvent (MME API) ──
-        int deviceNumber = FindWaveInDevice(micDevice);
+        int deviceNumber = DeviceHelper.FindWaveInDevice(micDevice, "Vosk");
         _micCapture = new WaveInEvent
         {
             DeviceNumber = deviceNumber,
@@ -96,29 +106,7 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         _speakerCapture = new WasapiLoopbackCapture(speakerDevice);
     }
 
-    private static int FindWaveInDevice(MMDevice mmDevice)
-    {
-        string targetName = mmDevice.FriendlyName;
-
-        for (int i = 0; i < WaveIn.DeviceCount; i++)
-        {
-            var caps = WaveIn.GetCapabilities(i);
-            string prodName = caps.ProductName;
-
-            if (targetName.StartsWith(prodName, StringComparison.OrdinalIgnoreCase) ||
-                prodName.StartsWith(targetName[..Math.Min(targetName.Length, prodName.Length)],
-                                    StringComparison.OrdinalIgnoreCase))
-            {
-                Console.WriteLine($"[Vosk] WaveIn デバイス #{i}: {prodName} (マッチ)");
-                return i;
-            }
-        }
-
-        Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.WriteLine($"[Vosk] WaveIn デバイスが名前で一致しません。デフォルトを使用します。");
-        Console.ResetColor();
-        return 0;
-    }
+    // FindWaveInDevice は DeviceHelper に統合済み
 
     public void Start()
     {
@@ -172,6 +160,11 @@ public sealed class VoskCallTranscriber : ICallTranscriber
 
         _micChunks++;
 
+        // 音量通知 (#2)
+        short micPeak = AudioProcessing.CalcPeak(e.Buffer, e.BytesRecorded);
+        _lastMicPeak = micPeak;
+        OnVolumeUpdated?.Invoke(_lastMicPeak, _lastSpkPeak);
+
         // 録音バッファに保存 (Whisper 後処理用)
         if (_enableRecording)
         {
@@ -184,16 +177,17 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         // 初回ログ
         if (_micChunks <= 1)
         {
-            short maxSample = AudioProcessing.CalcPeak(e.Buffer, e.BytesRecorded);
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine($"  [Vosk] マイク ピーク={maxSample}");
-            Console.ResetColor();
+            AppLogger.Debug($"[Vosk] マイク ピーク={micPeak}");
         }
 
         // Vosk に音声データを供給
-        if (_micRecognizer.AcceptWaveform(e.Buffer, e.BytesRecorded))
+        lock (_micRecognizerLock)
         {
-            ProcessResult(_micRecognizer.Result(), "自分");
+            if (_stopping || _micRecognizer == null) return;
+            if (_micRecognizer.AcceptWaveform(e.Buffer, e.BytesRecorded))
+            {
+                ProcessResult(_micRecognizer.Result(), "自分");
+            }
         }
     }
 
@@ -202,7 +196,7 @@ public sealed class VoskCallTranscriber : ICallTranscriber
     // ────────────────────────────────────────────────
     private void OnSpeakerDataAvailable(object? sender, WaveInEventArgs e)
     {
-        if (e.BytesRecorded == 0 || _speakerRecognizer == null) return;
+        if (e.BytesRecorded == 0 || _speakerRecognizer == null || _stopping) return;
 
         _speakerChunks++;
 
@@ -224,21 +218,25 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         // 初回ログ
         if (_speakerChunks <= 1)
         {
-            short maxSample = AudioProcessing.CalcPeak(converted, converted.Length);
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine($"  [Vosk] スピーカー ピーク={maxSample}");
-            Console.ResetColor();
+            short maxSample2 = AudioProcessing.CalcPeak(converted, converted.Length);
+            AppLogger.Debug($"[Vosk] スピーカー ピーク={maxSample2}");
         }
 
         // 無音フィルタ: ピークが閾値以下ならVoskへの供給をスキップ
         // (無音データを大量に流し続けるとVoskが不安定になる)
         short peak = AudioProcessing.CalcPeak(converted, converted.Length);
+        _lastSpkPeak = peak;
+        OnVolumeUpdated?.Invoke(_lastMicPeak, _lastSpkPeak);
         if (peak < 50) return;
 
         // Vosk に音声データを供給
-        if (!_stopping && _speakerRecognizer.AcceptWaveform(converted, converted.Length))
+        lock (_speakerRecognizerLock)
         {
-            ProcessResult(_speakerRecognizer.Result(), "相手");
+            if (_stopping || _speakerRecognizer == null) return;
+            if (_speakerRecognizer.AcceptWaveform(converted, converted.Length))
+            {
+                ProcessResult(_speakerRecognizer.Result(), "相手");
+            }
         }
     }
 
@@ -306,16 +304,20 @@ public sealed class VoskCallTranscriber : ICallTranscriber
     // ────────────────────────────────────────────────
     public void Stop()
     {
+        if (_stopping || _disposed) return;
         _stopping = true;
 
-        _micCapture.StopRecording();
-        _speakerCapture.StopRecording();
+        try { _micCapture.StopRecording(); } catch { }
+        try { _speakerCapture.StopRecording(); } catch { }
 
-        // 残りの音声を最終認識
+        // 残りの音声を最終認識 (コールバックとの排他制御)
         try
         {
-            if (_micRecognizer != null)
-                ProcessResult(_micRecognizer.FinalResult(), "自分");
+            lock (_micRecognizerLock)
+            {
+                if (_micRecognizer != null)
+                    ProcessResult(_micRecognizer.FinalResult(), "自分");
+            }
         }
         catch (Exception ex)
         {
@@ -323,8 +325,11 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         }
         try
         {
-            if (_speakerRecognizer != null)
-                ProcessResult(_speakerRecognizer.FinalResult(), "相手");
+            lock (_speakerRecognizerLock)
+            {
+                if (_speakerRecognizer != null)
+                    ProcessResult(_speakerRecognizer.FinalResult(), "相手");
+            }
         }
         catch (Exception ex)
         {

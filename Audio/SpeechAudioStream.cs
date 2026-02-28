@@ -103,6 +103,8 @@ public sealed class SpeechAudioStream : Stream
         if (disposing)
         {
             _done = true;
+            // Read/Write スレッドを安全にアンブロックしてから破棄
+            try { _buffer.CompleteAdding(); } catch (ObjectDisposedException) { }
             _buffer.Dispose();
         }
         base.Dispose(disposing);

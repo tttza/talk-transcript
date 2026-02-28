@@ -78,14 +78,14 @@ internal static class AudioProcessing
     /// <summary>PCM 16bit バッファ内のピーク振幅を返す</summary>
     public static short CalcPeak(byte[] buffer, int length)
     {
-        short max = 0;
+        int max = 0;
         for (int j = 0; j + 1 < length; j += 2)
         {
             short s = BitConverter.ToInt16(buffer, j);
-            short abs = Math.Abs(s);
+            int abs = Math.Abs((int)s); // short.MinValue (-32768) でも安全
             if (abs > max) max = abs;
         }
-        return max;
+        return (short)Math.Min(max, short.MaxValue);
     }
 
     /// <summary>PCM 16bit バッファの RMS (二乗平均平方根) を計算する</summary>

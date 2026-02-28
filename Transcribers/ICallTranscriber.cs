@@ -4,7 +4,7 @@ namespace TalkTranscript.Transcribers;
 
 /// <summary>
 /// 通話文字起こしエンジンの共通インターフェース。
-/// SAPI / Vosk など異なるエンジンを切り替えて使用するために定義。
+/// SAPI / Vosk / Whisper など異なるエンジンを切り替えて使用するために定義。
 /// </summary>
 public interface ICallTranscriber : IDisposable
 {
@@ -19,6 +19,9 @@ public interface ICallTranscriber : IDisposable
 
     /// <summary>認識結果が得られたときに発火するイベント</summary>
     event Action<TranscriptEntry>? OnTranscribed;
+
+    /// <summary>音量レベルが更新されたときに発火するイベント (micPeak, speakerPeak: 0-32767)</summary>
+    event Action<float, float>? OnVolumeUpdated;
 
     /// <summary>キャプチャと音声認識を開始する</summary>
     void Start();

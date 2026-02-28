@@ -1,6 +1,7 @@
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using TalkTranscript.Audio;
+using TalkTranscript.Logging;
 using TalkTranscript.Models;
 using Whisper.net;
 
@@ -22,6 +23,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     // ── Whisper ──
     private readonly WhisperFactory _factory;
     private readonly string _modelSize;
+    private readonly string _language;
 
     // ── キャプチャ ──
     private readonly WaveInEvent _micCapture;
@@ -58,17 +60,24 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     // ── VAD エネルギー履歴 (スライディングウィンドウ) ──
     private readonly Queue<float> _micEnergyHistory = new();
     private readonly Queue<float> _spkEnergyHistory = new();
-    private const int EnergyHistorySize = 10; // 直近10チャンク分
+    private const int EnergyHistorySize = 10;
 
     // ── Prompt 引き継ぎ (文脈連続性) ──
     private string _micLastPrompt = "";
     private string _spkLastPrompt = "";
-    /// <summary>Prompt の最大長 (Whisper のトークン上限を考慮)</summary>
     private const int MaxPromptLength = 200;
 
-    // ── 重複検出用: 直近の認識テキスト ──
+    // ── 重複検出用 ──
     private string _micLastText = "";
     private string _spkLastText = "";
+
+    // ── アダプティブノイズゲート (#8) ──
+    private readonly AdaptiveNoiseGate _micNoiseGate = new();
+    private readonly AdaptiveNoiseGate _spkNoiseGate = new();
+
+    // ── 音量通知 (#2) ──
+    private volatile float _lastMicPeak;
+    private volatile float _lastSpkPeak;
 
     // ── 設定 ──
     /// <summary>無音と判定するピーク閾値 (チャンク単位)</summary>
@@ -109,6 +118,9 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
     public event Action<TranscriptEntry>? OnTranscribed;
 
+    /// <summary>音量レベルが更新されたときに発火 (micPeak, speakerPeak)</summary>
+    public event Action<float, float>? OnVolumeUpdated;
+
     /// <summary>Whisper 処理開始時に発火 (speaker, durationSec)</summary>
     public event Action<string, double>? OnProcessingStarted;
 
@@ -118,6 +130,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     /// <param name="whisperModelPath">Whisper GGML モデルファイルへのパス</param>
     /// <param name="modelSize">モデル名 (ログ表示用: "tiny", "base" など)</param>
     /// <param name="useGpu">true で GPU (CUDA) を使用</param>
+    /// <param name="language">認識言語 ("ja", "en", "auto" など)</param>
     /// <param name="enableRecording">true で録音バッファを保持する (後処理用)</param>
     public WhisperCallTranscriber(
         string whisperModelPath,
@@ -125,10 +138,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         MMDevice micDevice,
         MMDevice speakerDevice,
         bool useGpu = true,
+        string language = "ja",
         bool enableRecording = false)
     {
         _factory = WhisperFactory.FromPath(whisperModelPath, new WhisperFactoryOptions { UseGpu = useGpu });
         _modelSize = modelSize;
+        _language = language;
         _enableRecording = enableRecording;
         if (enableRecording)
         {
@@ -136,7 +151,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             _speakerRecording = new MemoryStream();
         }
 
-        int deviceNumber = FindWaveInDevice(micDevice);
+        int deviceNumber = DeviceHelper.FindWaveInDevice(micDevice, "Whisper");
         _micCapture = new WaveInEvent
         {
             DeviceNumber = deviceNumber,
@@ -147,29 +162,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         _speakerCapture = new WasapiLoopbackCapture(speakerDevice);
     }
 
-    private static int FindWaveInDevice(MMDevice mmDevice)
-    {
-        string targetName = mmDevice.FriendlyName;
-
-        for (int i = 0; i < WaveIn.DeviceCount; i++)
-        {
-            var caps = WaveIn.GetCapabilities(i);
-            string prodName = caps.ProductName;
-
-            if (targetName.StartsWith(prodName, StringComparison.OrdinalIgnoreCase) ||
-                prodName.StartsWith(targetName[..Math.Min(targetName.Length, prodName.Length)],
-                                    StringComparison.OrdinalIgnoreCase))
-            {
-                Console.WriteLine($"[Whisper] WaveIn デバイス #{i}: {prodName} (マッチ)");
-                return i;
-            }
-        }
-
-        Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.WriteLine($"[Whisper] WaveIn デバイスが名前で一致しません。デフォルトを使用します。");
-        Console.ResetColor();
-        return 0;
-    }
+    // FindWaveInDevice は DeviceHelper に統合済み
 
     public void Start()
     {
@@ -213,6 +206,13 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         short peak = AudioProcessing.CalcPeak(e.Buffer, e.BytesRecorded);
         float rms = AudioProcessing.CalcRms(e.Buffer, e.BytesRecorded);
 
+        // 音量通知 (#2)
+        _lastMicPeak = peak;
+        OnVolumeUpdated?.Invoke(_lastMicPeak, _lastSpkPeak);
+
+        // アダプティブノイズゲート (#8)
+        _micNoiseGate.Update(rms);
+
         // エネルギー履歴を更新 (スライディングウィンドウ VAD)
         lock (_micBufLock)
         {
@@ -230,8 +230,8 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             }
         }
 
-        // 無音スキップ: ピーク + エネルギー の二重判定
-        if (peak < SilenceThreshold && rms < VadEnergyThreshold) return;
+        // 無音スキップ: アダプティブノイズゲート判定
+        if (!_micNoiseGate.IsVoice(peak, rms)) return;
 
         // VAD: 音声がある時刻を記録
         _micLastVoiceTime = DateTime.UtcNow;
@@ -256,9 +256,16 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             e.Buffer, e.BytesRecorded, _loopbackFormat!, TargetFormat);
         if (converted.Length == 0) return;
 
-        // 無音スキップ: ピーク + エネルギー の二重判定
+        // 無音スキップ: アダプティブノイズゲート判定
         short peak = AudioProcessing.CalcPeak(converted, converted.Length);
         float rms = AudioProcessing.CalcRms(converted, converted.Length);
+
+        // 音量通知 (#2)
+        _lastSpkPeak = peak;
+        OnVolumeUpdated?.Invoke(_lastMicPeak, _lastSpkPeak);
+
+        // アダプティブノイズゲート (#8)
+        _spkNoiseGate.Update(rms);
 
         // エネルギー履歴を更新
         lock (_spkBufLock)
@@ -268,7 +275,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 _spkEnergyHistory.Dequeue();
         }
 
-        if (peak < SilenceThreshold && rms < VadEnergyThreshold) return;
+        if (!_spkNoiseGate.IsVoice(peak, rms)) return;
 
         // VAD: 音声がある時刻を記録
         _spkLastVoiceTime = DateTime.UtcNow;
@@ -353,7 +360,6 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 {
                     pcmData = buffer.ToArray();
                     buffer.SetLength(0);
-                    buffer.Capacity = 0; // 内部バッファを解放してメモリ回収
                 }
             }
 
@@ -380,7 +386,6 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         {
             remaining = buffer.Length > 0 ? buffer.ToArray() : null;
             buffer.SetLength(0);
-            buffer.Capacity = 0;
         }
 
         if (remaining != null)
@@ -409,7 +414,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             try
             {
                 var builder = _factory.CreateBuilder()
-                    .WithLanguage("ja")
+                    .WithLanguage(_language)
                     .WithThreads(Math.Max(1, Environment.ProcessorCount / 2));
 
                 // 前回の認識結果を prompt として渡し、文脈を維持
@@ -473,8 +478,9 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
             return sb.ToString();
         }
-        catch
+        catch (Exception ex)
         {
+            Logging.AppLogger.Error($"[Whisper] {speaker} 認識エラー", ex);
             return "";
         }
     }
@@ -492,10 +498,11 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     // ────────────────────────────────────────────────
     public void Stop()
     {
+        if (_stopping || _disposed) return;
         _stopping = true;
 
-        _micCapture.StopRecording();
-        _speakerCapture.StopRecording();
+        try { _micCapture.StopRecording(); } catch { }
+        try { _speakerCapture.StopRecording(); } catch { }
 
         // 認識スレッドの完了を待つ
         _micProcessThread?.Join(TimeSpan.FromSeconds(15));

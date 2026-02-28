@@ -28,6 +28,14 @@ internal sealed class SpectreUI
     private int _testSeconds;
     private DateTime _startTime;
 
+    // ── 音量メーター (#2) ──
+    private volatile float _micVolume;
+    private volatile float _speakerVolume;
+
+    // ── ブックマーク (#3) ──
+    private readonly List<DateTime> _bookmarks = new();
+    public event Action? OnBookmarkRequested;
+
     public void Configure(string engine, bool useGpu, string mic, string speaker,
                           string fileName, bool test, int testSec)
     {
@@ -58,14 +66,48 @@ internal sealed class SpectreUI
         lock (_lock) _processing.Remove(speaker);
     }
 
+    /// <summary>音量レベルを更新する (スレッドセーフ)</summary>
+    public void UpdateVolume(float micPeak, float speakerPeak)
+    {
+        _micVolume = micPeak;
+        _speakerVolume = speakerPeak;
+    }
+
+    /// <summary>ブックマークを追加する</summary>
+    public void AddBookmark()
+    {
+        lock (_lock) _bookmarks.Add(DateTime.Now);
+    }
+
     /// <summary>
     /// Live 表示の録音セッションを実行する。
     /// キー入力またはテスト終了まで表示をブロックし、アクション名を返す。
+    /// コンソールがリダイレクトされている場合は簡易ループにフォールバック。
     /// </summary>
     public string RunSession(DateTime startTime)
     {
         _startTime = startTime;
-        string action = "quit";
+
+        // コンソールがリダイレクトされている場合は Live 表示を使わない
+        // (Spectre.Console の LiveDisplay は CursorVisible を操作するため IOException になる)
+        if (Console.IsOutputRedirected || Console.IsInputRedirected)
+            return RunFallbackSession();
+
+        try
+        {
+            return RunLiveSession();
+        }
+        catch (IOException)
+        {
+            // CursorVisible 操作が失敗した場合のフォールバック
+            return RunFallbackSession();
+        }
+    }
+
+    /// <summary>Spectre.Console Live 表示を使った通常セッション</summary>
+    private string RunLiveSession()
+    {
+        string? action = "quit";
         var spinnerFrames = new[] { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
         int frame = 0;
 
@@ -77,18 +119,8 @@ internal sealed class SpectreUI
                 while (true)
                 {
                     // ── キー入力チェック ──
-                    if (!_isTest && Console.KeyAvailable)
-                    {
-                        var key = Console.ReadKey(intercept: true);
-                        if (key.Key == ConsoleKey.Q && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-                        { action = "quit"; break; }
-                        if (key.Key == ConsoleKey.D && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-                        { action = "device"; break; }
-                        if (key.Key == ConsoleKey.E && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-                        { action = "engine"; break; }
-                        if (key.Key == ConsoleKey.G && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-                        { action = "gpu"; break; }
-                    }
+                    var input = CheckKeyInput();
+                    if (input != null) { action = input; break; }
 
                     // ── テストモード自動停止 ──
                     if (_isTest && (DateTime.Now - _startTime).TotalSeconds >= _testSeconds)
@@ -101,7 +133,68 @@ internal sealed class SpectreUI
                 }
             });
 
-        return action;
+        return action ?? "quit";
+    }
+
+    /// <summary>コンソールがリダイレクトされている場合の簡易セッション</summary>
+    private string RunFallbackSession()
+    {
+        Console.WriteLine("  ● 録音中...");
+        int lastCount = 0;
+
+        while (true)
+        {
+            // ── キー入力チェック (リダイレクト時はスキップ) ──
+            if (!Console.IsInputRedirected)
+            {
+                var result = CheckKeyInput();
+                if (result != null) return result;
+            }
+
+            // ── テストモード自動停止 ──
+            if (_isTest && (DateTime.Now - _startTime).TotalSeconds >= _testSeconds)
+                return "quit";
+
+            // ── 新しい認識結果を表示 ──
+            lock (_lock)
+            {
+                while (lastCount < _entries.Count)
+                {
+                    var entry = _entries[lastCount];
+                    Console.WriteLine($"  [{entry.Timestamp:HH:mm:ss}] {entry.Speaker}: {entry.Text}");
+                    lastCount++;
+                }
+            }
+
+            Thread.Sleep(200);
+        }
+    }
+
+    /// <summary>キー入力をチェックし、アクション文字列を返す。入力なしなら null。</summary>
+    private string? CheckKeyInput()
+    {
+        try
+        {
+            if (_isTest || Console.IsInputRedirected || !Console.KeyAvailable)
+                return null;
+        }
+        catch (InvalidOperationException) { return null; }
+
+        var key = Console.ReadKey(intercept: true);
+        if (key.Key == ConsoleKey.Q && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            return "quit";
+        if (key.Key == ConsoleKey.D && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            return "device";
+        if (key.Key == ConsoleKey.E && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            return "engine";
+        if (key.Key == ConsoleKey.G && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            return "gpu";
+        if (key.Key == ConsoleKey.B && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+        {
+            AddBookmark();
+            OnBookmarkRequested?.Invoke();
+        }
+        return null;
     }
 
     private IRenderable BuildDisplay(string spinnerFrame)
@@ -115,6 +208,11 @@ internal sealed class SpectreUI
             statusParts.Add($"[magenta]テスト ({_testSeconds}秒)[/]");
         statusParts.Add($"[dim]経過[/] {elapsed:hh\\:mm\\:ss}");
         rows.Add(new Markup("  " + string.Join("  ", statusParts)));
+
+        // ── 音量メーター (#2) ──
+        rows.Add(new Markup("  " + BuildVolumeBar("🎤", _micVolume, "cyan") + "   " +
+                                   BuildVolumeBar("🔊", _speakerVolume, "yellow")));
+
         rows.Add(new Rule().RuleStyle("dim"));
 
         // ── 文字起こし結果 ──
@@ -162,10 +260,27 @@ internal sealed class SpectreUI
                 "  [white bold]Ctrl+Q[/] [dim]停止[/]  │  " +
                 "[white bold]Ctrl+D[/] [dim]デバイス[/]  │  " +
                 "[white bold]Ctrl+E[/] [dim]エンジン[/]  │  " +
-                "[white bold]Ctrl+G[/] [dim]GPU切替[/]"));
+                "[white bold]Ctrl+G[/] [dim]GPU切替[/]  │  " +
+                "[white bold]Ctrl+B[/] [dim]ブックマーク[/]"));
         }
 
         return new Rows(rows);
+    }
+
+    /// <summary>音量バーを Spectre.Console マークアップ文字列で生成する</summary>
+    private static string BuildVolumeBar(string icon, float peak, string color)
+    {
+        const int barWidth = 15;
+        // ピーク値を 0-1 に正規化 (16bit PCM の最大値 = 32767)
+        float normalized = Math.Clamp(peak / 32767f, 0f, 1f);
+        int filled = (int)(normalized * barWidth);
+
+        // dB 表示
+        float db = peak > 0 ? 20f * MathF.Log10(peak / 32767f) : -60f;
+        string dbStr = db > -60f ? $"{db:F0}dB" : "---";
+
+        string bar = new string('█', filled) + new string('░', barWidth - filled);
+        return $"{icon} [{color}]{bar}[/] [dim]{dbStr}[/]";
     }
 
     // ══════════════════════════════════════════════════

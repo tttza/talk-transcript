@@ -14,9 +14,11 @@ public sealed class TranscriptWriter : IDisposable
     private string? _lastSpeaker;
     private int _selfCount;
     private int _otherCount;
+    private int _bookmarkCount;
     private DateTime? _firstTimestamp;
     private DateTime? _lastTimestamp;
     private bool _disposed;
+    private bool _closed;
 
     /// <summary>出力先ファイルパス</summary>
     public string FilePath => _filePath;
@@ -49,6 +51,16 @@ public sealed class TranscriptWriter : IDisposable
             _firstTimestamp ??= entry.Timestamp;
             _lastTimestamp = entry.Timestamp;
 
+            // ブックマークエントリ
+            if (entry.IsBookmark)
+            {
+                _writer.WriteLine();
+                _writer.WriteLine($"  ★ [{entry.Timestamp:HH:mm:ss}] ブックマーク: {entry.Text}");
+                _writer.WriteLine();
+                _bookmarkCount++;
+                return;
+            }
+
             // 話者が変わったら空行を挿入して見やすくする
             if (_lastSpeaker != null && _lastSpeaker != entry.Speaker)
             {
@@ -68,7 +80,8 @@ public sealed class TranscriptWriter : IDisposable
     /// </summary>
     public void Close()
     {
-        if (_disposed) return;
+        if (_disposed || _closed) return;
+        _closed = true;
 
         lock (_writer)
         {
@@ -81,6 +94,8 @@ public sealed class TranscriptWriter : IDisposable
             _writer.WriteLine($"合計発言数: {_selfCount + _otherCount}");
             _writer.WriteLine($"  自分: {_selfCount} 件");
             _writer.WriteLine($"  相手: {_otherCount} 件");
+            if (_bookmarkCount > 0)
+                _writer.WriteLine($"  ブックマーク: {_bookmarkCount} 件");
 
             _writer.Flush();
         }
@@ -90,6 +105,7 @@ public sealed class TranscriptWriter : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        try { Close(); } catch { /* Dispose 中の例外は無視 */ }
         _writer.Dispose();
     }
 }

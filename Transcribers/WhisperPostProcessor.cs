@@ -32,7 +32,8 @@ public static class WhisperPostProcessor
         byte[] micPcm,
         byte[] speakerPcm,
         DateTime callStartTime,
-        bool useGpu = true)
+        bool useGpu = true,
+        string language = "ja")
     {
         var entries = new List<TranscriptEntry>();
 
@@ -44,7 +45,7 @@ public static class WhisperPostProcessor
         if (micPcm.Length > 0)
         {
             Console.WriteLine($"[Whisper] マイク音声を処理中 ({micPcm.Length / 1024}KB)...");
-            var micEntries = await ProcessSingleAsync(factory, micPcm, "自分", callStartTime);
+            var micEntries = await ProcessSingleAsync(factory, micPcm, "自分", callStartTime, language);
             entries.AddRange(micEntries);
             Console.WriteLine($"[Whisper] マイク: {micEntries.Count} セグメント認識");
         }
@@ -53,7 +54,7 @@ public static class WhisperPostProcessor
         if (speakerPcm.Length > 0)
         {
             Console.WriteLine($"[Whisper] スピーカー音声を処理中 ({speakerPcm.Length / 1024}KB)...");
-            var spkEntries = await ProcessSingleAsync(factory, speakerPcm, "相手", callStartTime);
+            var spkEntries = await ProcessSingleAsync(factory, speakerPcm, "相手", callStartTime, language);
             entries.AddRange(spkEntries);
             Console.WriteLine($"[Whisper] スピーカー: {spkEntries.Count} セグメント認識");
         }
@@ -72,21 +73,19 @@ public static class WhisperPostProcessor
         WhisperFactory factory,
         byte[] pcm16bit,
         string speaker,
-        DateTime callStartTime)
+        DateTime callStartTime,
+        string language = "ja")
     {
         var entries = new List<TranscriptEntry>();
 
-        // 16bit PCM → float32 に変換
-        float[] samples = AudioProcessing.ConvertPcm16ToFloat(pcm16bit);
-
         using var processor = factory.CreateBuilder()
-            .WithLanguage("ja")
+            .WithLanguage(language)
             .WithThreads(Math.Max(1, Environment.ProcessorCount / 2))
             .Build();
 
         using var stream = new MemoryStream();
-        // WAV ヘッダーを書き込んでから float サンプルを書き込む
-        AudioProcessing.WriteWavFloat(stream, samples, 16000);
+        // Whisper.net は PCM16 WAV を期待する (IEEE float WAV は "Unsupported wave file" になる)
+        AudioProcessing.WriteWavPcm16(stream, pcm16bit, 16000);
         stream.Position = 0;
 
         string lastText = "";
