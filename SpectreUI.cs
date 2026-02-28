@@ -32,6 +32,11 @@ internal sealed class SpectreUI
     private volatile float _micVolume;
     private volatile float _speakerVolume;
 
+    // ── スクロール ──
+    private int _scrollOffset;          // 0 = 最新表示, 正の値 = 過去方向へのオフセット
+    private DateTime _lastScrollTime;   // 最後にスクロール操作した時刻
+    private const int ScrollHoldSeconds = 5; // スクロール操作後に自動ジャンプを抑制する秒数
+
     // ── ブックマーク (#3) ──
     private readonly List<DateTime> _bookmarks = new();
     public event Action? OnBookmarkRequested;
@@ -51,7 +56,13 @@ internal sealed class SpectreUI
     /// <summary>認識結果を追加する (スレッドセーフ)</summary>
     public void AddEntry(TranscriptEntry entry)
     {
-        lock (_lock) _entries.Add(entry);
+        lock (_lock)
+        {
+            _entries.Add(entry);
+            // スクロール操作から一定時間経過していれば最新へジャンプ
+            if (_scrollOffset == 0 || (DateTime.Now - _lastScrollTime).TotalSeconds >= ScrollHoldSeconds)
+                _scrollOffset = 0;
+        }
     }
 
     /// <summary>処理中状態を設定する (スレッドセーフ)</summary>
@@ -190,6 +201,45 @@ internal sealed class SpectreUI
             AddBookmark();
             OnBookmarkRequested?.Invoke();
         }
+
+        // ── スクロール操作 ──
+        if (key.Key == ConsoleKey.UpArrow || key.Key == ConsoleKey.PageUp)
+        {
+            int step = key.Key == ConsoleKey.PageUp ? 10 : 1;
+            lock (_lock)
+            {
+                int maxEntries;
+                try { maxEntries = Math.Max(3, Console.WindowHeight - 10); }
+                catch { maxEntries = 20; }
+                int maxOffset = Math.Max(0, _entries.Count - maxEntries);
+                _scrollOffset = Math.Min(_scrollOffset + step, maxOffset);
+                _lastScrollTime = DateTime.Now;
+            }
+        }
+        if (key.Key == ConsoleKey.DownArrow || key.Key == ConsoleKey.PageDown)
+        {
+            int step = key.Key == ConsoleKey.PageDown ? 10 : 1;
+            lock (_lock)
+            {
+                _scrollOffset = Math.Max(0, _scrollOffset - step);
+                if (_scrollOffset > 0) _lastScrollTime = DateTime.Now;
+            }
+        }
+        if (key.Key == ConsoleKey.Home)
+        {
+            lock (_lock)
+            {
+                int maxEntries;
+                try { maxEntries = Math.Max(3, Console.WindowHeight - 10); }
+                catch { maxEntries = 20; }
+                _scrollOffset = Math.Max(0, _entries.Count - maxEntries);
+                _lastScrollTime = DateTime.Now;
+            }
+        }
+        if (key.Key == ConsoleKey.End)
+        {
+            lock (_lock) _scrollOffset = 0;
+        }
         return null;
     }
 
@@ -218,16 +268,30 @@ internal sealed class SpectreUI
 
         List<TranscriptEntry> visible;
         Dictionary<string, double> proc;
+        int totalEntries, scrollOff, hiddenAbove, hiddenBelow;
         lock (_lock)
         {
-            int skip = Math.Max(0, _entries.Count - maxEntries);
-            visible = _entries.Skip(skip).ToList();
+            totalEntries = _entries.Count;
+            scrollOff = _scrollOffset;
+            // 表示範囲: 末尾から scrollOffset 分戻った位置を基準に maxEntries 件表示
+            int endIdx = totalEntries - scrollOff;            // 表示末尾 (exclusive)
+            int startIdx = Math.Max(0, endIdx - maxEntries);  // 表示先頭
+            endIdx = Math.Max(startIdx, endIdx);              // 安全ガード
+            visible = _entries.GetRange(startIdx, endIdx - startIdx);
+            hiddenAbove = startIdx;
+            hiddenBelow = totalEntries - endIdx;
             proc = new Dictionary<string, double>(_processing);
         }
 
         if (visible.Count == 0 && proc.Count == 0)
         {
             rows.Add(new Markup("  [dim]音声を待っています...[/]"));
+        }
+
+        // ── スクロール位置インジケーター (上方向) ──
+        if (hiddenAbove > 0)
+        {
+            rows.Add(new Markup($"  [dim]  ↑ さらに {hiddenAbove} 件[/]"));
         }
 
         foreach (var entry in visible)
@@ -238,6 +302,12 @@ internal sealed class SpectreUI
                 $"  [dim]{entry.Timestamp:HH:mm:ss}[/]  " +
                 $"[{color}]{icon} {Markup.Escape(entry.Speaker)}:[/] " +
                 Markup.Escape(entry.Text)));
+        }
+
+        // ── スクロール位置インジケーター (下方向) ──
+        if (hiddenBelow > 0)
+        {
+            rows.Add(new Markup($"  [dim]  ↓ さらに {hiddenBelow} 件 (最新)[/]"));
         }
 
         // ── 処理中インジケーター (スピナー) ──
@@ -252,10 +322,13 @@ internal sealed class SpectreUI
         rows.Add(new Rule().RuleStyle("dim"));
         if (!_isTest)
         {
-            rows.Add(new Markup(
-                "  [white bold]Ctrl+Q[/] [dim]停止[/]  │  " +
+            var guide = "  [white bold]Ctrl+Q[/] [dim]停止[/]  │  " +
                 "[white bold]F2[/] [dim]設定[/]  │  " +
-                "[white bold]Ctrl+B[/] [dim]ブックマーク[/]"));
+                "[white bold]Ctrl+B[/] [dim]ブックマーク[/]  │  " +
+                "[white bold]↑↓[/][dim]/[/][white bold]PgUp PgDn[/] [dim]スクロール[/]";
+            if (scrollOff > 0)
+                guide += "  │  [white bold]End[/] [dim]最新へ[/]";
+            rows.Add(new Markup(guide));
         }
 
         return new Rows(rows);
