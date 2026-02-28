@@ -22,8 +22,11 @@ bool whisperOnly = args.Contains("--whisper-only");
 bool configMode = args.Contains("--config");
 int testSeconds = 12;
 
-// エンジン選択: --engine 引数 > 設定ファイル > 環境推奨
+// ── 設定読み込み (1回だけ) ──
 var hwProfile = HardwareInfo.Detect();
+var settings = AppSettings.Load();
+
+// エンジン選択: --engine 引数 > 設定ファイル > 環境推奨
 string engineName;
 bool useGpu;
 int engineIdx = Array.IndexOf(args, "--engine");
@@ -34,19 +37,8 @@ if (engineIdx >= 0 && engineIdx + 1 < args.Length)
 }
 else
 {
-    var savedSettings = AppSettings.Load();
-    if (savedSettings.EngineName != null)
-    {
-        // 保存済み設定を使用
-        engineName = savedSettings.EngineName.ToLowerInvariant();
-        useGpu = savedSettings.UseGpu;
-    }
-    else
-    {
-        // 初回起動: 環境に最適なエンジンを自動選択
-        engineName = hwProfile.RecommendedEngine;
-        useGpu = hwProfile.RecommendedUseGpu;
-    }
+    engineName = (settings.EngineName ?? hwProfile.RecommendedEngine).ToLowerInvariant();
+    useGpu = settings.EngineName != null ? settings.UseGpu : hwProfile.RecommendedUseGpu;
 }
 
 // Whisper モデルサイズの解析
@@ -105,28 +97,26 @@ if (!testMode)
 }
 
 // ── 言語設定 (#7) ──
-var appSettings = AppSettings.Load();
 string language = "ja"; // デフォルト
 int langIdx = Array.IndexOf(args, "--lang");
 if (langIdx >= 0 && langIdx + 1 < args.Length)
 {
     language = args[langIdx + 1].ToLowerInvariant();
 }
-else if (!string.IsNullOrEmpty(appSettings.Language))
+else if (!string.IsNullOrEmpty(settings.Language))
 {
-    language = appSettings.Language;
+    language = settings.Language;
 }
 AppLogger.Info($"認識言語: {language}");
 
 // ── 出力フォーマット設定 (#1) ──
 var extraFormats = EngineSelector.ParseFormats(args);
-if (extraFormats.Count == 0 && appSettings.OutputFormats?.Count > 0)
+if (extraFormats.Count == 0 && settings.OutputFormats?.Count > 0)
 {
-    extraFormats = appSettings.OutputFormats;
+    extraFormats = settings.OutputFormats;
 }
 
 // ── デバイス読み込み ──
-var settings = AppSettings.Load();
 bool hasSavedDevices = !string.IsNullOrEmpty(settings.MicrophoneDeviceId)
                     && !string.IsNullOrEmpty(settings.SpeakerDeviceId);
 
@@ -168,6 +158,7 @@ using var writer = new TranscriptWriter(filePath);
 var overallStart = DateTime.Now;
 int totalMicCount = 0;
 int totalSpkCount = 0;
+var allEntries = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>(); // 全セッションのエントリを蓄積 (エクスポート用・スレッドセーフ)
 
 // ── セッションループ ──
 // Ctrl+D/E で停止→設定変更→再開、Ctrl+Q で終了
@@ -225,7 +216,19 @@ while (!quit)
     }
     else
     {
-        string sapiCulture = language == "auto" ? "ja-JP" : (language + (language.Contains('-') ? "" : language == "ja" ? "-JP" : language == "en" ? "-US" : ""));
+        string sapiCulture = language switch
+        {
+            "auto" => "ja-JP",
+            var l when l.Contains('-') => l,
+            "ja" => "ja-JP",
+            "en" => "en-US",
+            "zh" => "zh-CN",
+            "ko" => "ko-KR",
+            "fr" => "fr-FR",
+            "de" => "de-DE",
+            "es" => "es-ES",
+            _ => language + "-" + language.ToUpperInvariant()
+        };
         callTranscriber = new SapiCallTranscriber(micDevice, speakerDevice, sapiCulture,
             enableRecording: enableRecording);
     }
@@ -242,6 +245,7 @@ while (!quit)
     {
         ui.AddEntry(entry);
         writer.Append(entry);
+        allEntries.Add(entry);
         if (entry.Speaker == "自分") { sessionMic++; totalMicCount++; }
         else { sessionSpk++; totalSpkCount++; }
     }
@@ -329,11 +333,11 @@ while (!quit)
             ConfigMenu.Show(hwProfile);
             // 設定を再読み込み
             settings = AppSettings.Load();
-            if (settings.EngineName != null)
-                engineName = settings.EngineName.ToLowerInvariant();
+            engineName = (settings.EngineName ?? hwProfile.RecommendedEngine).ToLowerInvariant();
             useGpu = settings.UseGpu;
-            if (!string.IsNullOrEmpty(settings.Language))
-                language = settings.Language;
+            language = !string.IsNullOrEmpty(settings.Language) ? settings.Language : "ja";
+            // 出力フォーマット再読み込み
+            extraFormats = settings.OutputFormats ?? new List<OutputFormat>();
             // デバイス再読み込み
             try
             {
@@ -358,8 +362,8 @@ SpectreUI.PrintSummary(filePath, totalMicCount, totalSpkCount, DateTime.Now - ov
 // ── 追加フォーマットでエクスポート (#1) ──
 if (extraFormats.Count > 0)
 {
-    var allEntries = lastTranscriber?.Entries ?? Array.Empty<TranscriptEntry>();
-    var exported = TranscriptExporter.Export(filePath, allEntries, extraFormats,
+    var sortedEntries = allEntries.OrderBy(e => e.Timestamp).ToList();
+    var exported = TranscriptExporter.Export(filePath, sortedEntries, extraFormats,
         overallStart, DateTime.Now - overallStart, engineName, language);
     foreach (var ep in exported)
     {

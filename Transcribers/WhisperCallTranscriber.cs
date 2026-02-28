@@ -275,12 +275,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 _spkEnergyHistory.Dequeue();
         }
 
-        if (!_spkNoiseGate.IsVoice(peak, rms)) return;
-
-        // VAD: 音声がある時刻を記録
-        _spkLastVoiceTime = DateTime.UtcNow;
-
-        // 録音全体を保存
+        // 録音全体を保存 (ノイズゲート前に記録 — マイクと同じ方式)
         if (_enableRecording)
         {
             lock (_spkRecLock)
@@ -288,6 +283,11 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 _speakerRecording!.Write(converted, 0, converted.Length);
             }
         }
+
+        if (!_spkNoiseGate.IsVoice(peak, rms)) return;
+
+        // VAD: 音声がある時刻を記録
+        _spkLastVoiceTime = DateTime.UtcNow;
 
         // 認識用バッファに追加
         lock (_spkBufLock)

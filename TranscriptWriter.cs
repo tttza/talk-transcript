@@ -104,8 +104,8 @@ public sealed class TranscriptWriter : IDisposable
     public void Dispose()
     {
         if (_disposed) return;
-        _disposed = true;
         try { Close(); } catch { /* Dispose 中の例外は無視 */ }
+        _disposed = true;
         _writer.Dispose();
     }
 }

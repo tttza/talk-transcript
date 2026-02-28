@@ -183,11 +183,18 @@ internal static class ConfigMenu
         var allFormats = Enum.GetValues<OutputFormat>();
         var currentFormats = settings.OutputFormats ?? new List<OutputFormat>();
 
-        var selected = AnsiConsole.Prompt(
-            new MultiSelectionPrompt<string>()
-                .Title("[cyan]  出力フォーマットを選択 (スペースで切替, Enter で確定):[/]")
-                .AddChoices(allFormats.Select(f => TranscriptExporter.FormatDescription(f)))
-                .InstructionsText("[dim](スペースで選択/解除)[/]"));
+        var prompt = new MultiSelectionPrompt<string>()
+            .Title("[cyan]  出力フォーマットを選択 (スペースで切替, Enter で確定):[/]")
+            .AddChoices(allFormats.Select(f => TranscriptExporter.FormatDescription(f)))
+            .InstructionsText("[dim](スペースで選択/解除)[/]");
+
+        // 現在の選択を事前選択
+        foreach (var f in currentFormats)
+        {
+            prompt.Select(TranscriptExporter.FormatDescription(f));
+        }
+
+        var selected = AnsiConsole.Prompt(prompt);
 
         settings.OutputFormats = new List<OutputFormat>();
         foreach (var sel in selected)
