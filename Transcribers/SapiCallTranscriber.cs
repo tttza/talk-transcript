@@ -305,17 +305,6 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     }
 
     // ────────────────────────────────────────────────
-    //  音声フォーマット変換 (共通関数へ委譲)
-    // ────────────────────────────────────────────────
-    /// <summary>
-    /// ループバック音声 (通常 IEEE Float 32bit) を 16kHz/16bit/mono に変換する。
-    /// リニア補間による高品質リサンプリングを使用。
-    /// </summary>
-    private static byte[] ConvertAudio(
-        byte[] source, int length, WaveFormat sourceFormat, WaveFormat targetFormat)
-        => AudioProcessing.ConvertLoopbackToTarget(source, length, sourceFormat, targetFormat);
-
-    // ────────────────────────────────────────────────
     //  認識イベントハンドラ
     // ────────────────────────────────────────────────
     private void OnAudioStateChanged(object? sender, AudioStateChangedEventArgs e)

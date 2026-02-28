@@ -1,6 +1,7 @@
 using TalkTranscript.Audio;
 using TalkTranscript.Models;
 using Whisper.net;
+using Whisper.net.SamplingStrategy;
 
 namespace TalkTranscript.Transcribers;
 
@@ -85,9 +86,24 @@ public static class WhisperPostProcessor
             ? Math.Min(maxCpuThreads, Math.Max(1, Environment.ProcessorCount - 1))
             : Math.Max(1, Environment.ProcessorCount / 2);
 
-        using var processor = factory.CreateBuilder()
+        // ── ビームサーチデコーディング (バッチ後処理は精度最優先) ──
+        var beamStrategy = (BeamSearchSamplingStrategyBuilder)factory.CreateBuilder()
+            .WithBeamSearchSamplingStrategy();
+        using var processor = beamStrategy
+            .WithBeamSize(5)
+            .WithPatience(1.0f)
+            .ParentBuilder
             .WithLanguage(language)
             .WithThreads(threads)
+            // ── Temperature 0 (決定論的) + フォールバック ──
+            .WithTemperature(0f)
+            .WithTemperatureInc(0.2f)
+            // ── 品質フィルタ閾値 ──
+            .WithEntropyThreshold(2.4f)
+            .WithLogProbThreshold(-1.0f)
+            .WithNoSpeechThreshold(0.6f)
+            // ── セグメント間のプロンプト引き継ぎ ──
+            .WithCarryInitialPrompt(true)
             .Build();
 
         using var stream = new MemoryStream();

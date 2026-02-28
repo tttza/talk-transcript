@@ -5,6 +5,7 @@ using TalkTranscript.Audio;
 using TalkTranscript.Logging;
 using TalkTranscript.Models;
 using Whisper.net;
+using Whisper.net.SamplingStrategy;
 
 namespace TalkTranscript.Transcribers;
 
@@ -65,9 +66,27 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     private string _spkLastPrompt = "";
     private const int MaxPromptLength = 200;
 
+    /// <summary>
+    /// 言語に応じた初期プロンプト。
+    /// Whisper の initial_prompt に目的のドメインを示す短いテキストを入れると
+    /// 最初のチャンクから適切な言語・文体で認識される。
+    /// </summary>
+    private static string GetInitialPrompt(string language) => language switch
+    {
+        "ja" => "会議の文字起こしです。",
+        "en" => "This is a meeting transcript.",
+        _ => ""
+    };
+
     // ── 重複検出用 ──
     private string _micLastText = "";
     private string _spkLastText = "";
+
+    // ── チャンク間オーバーラップ ──
+    private byte[]? _micOverlap;
+    private byte[]? _spkOverlap;
+    /// <summary>次のチャンクに引き継ぐオーバーラップ秒数</summary>
+    private const double OverlapSec = 0.5;
 
     // ── アダプティブノイズゲート (#8) ──
     private readonly AdaptiveNoiseGate _micNoiseGate = new();
@@ -89,7 +108,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     /// <summary>バッファ全体の RMS がこの値未満なら実質無音とみなしスキップ (Whisper ハルシネーション防止)</summary>
     private const float MinRmsEnergy = 200f;
     /// <summary>最小バッファ秒数 (短すぎるチャンクは精度が低い) — BackpressureMonitor で動的に調整される</summary>
-    private const double DefaultMinBufferSec = 1.2;
+    private const double DefaultMinBufferSec = 2.0;
     /// <summary>最大バッファ秒数 (長い発話でもここで強制処理) — BackpressureMonitor で動的に調整される</summary>
     private const double DefaultMaxBufferSec = 12.0;
     /// <summary>短い発話を救済する長い無音判定時間 (ms)。バッファが最小長未満でもこの時間無音が続けば処理する</summary>
@@ -154,6 +173,11 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         _maxCpuThreads = maxCpuThreads;
         _micRecording = new RecordingBuffer(enableRecording);
         _speakerRecording = new RecordingBuffer(enableRecording);
+
+        // 初期プロンプト: 言語に応じたドメインヒントを設定
+        string initialPrompt = GetInitialPrompt(language);
+        _micLastPrompt = initialPrompt;
+        _spkLastPrompt = initialPrompt;
 
         // バックプレッシャー制御を初期化
         _micBackpressure = new BackpressureMonitor(DefaultMinBufferSec, DefaultMaxBufferSec);
@@ -321,11 +345,13 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     // ────────────────────────────────────────────────
     private void MicProcessLoop() => VadProcessLoop("自分", _micBufLock, _micBuffer,
         () => _micLastVoiceTime, () => _micLastPrompt, p => _micLastPrompt = p,
-        () => _micLastText, t => _micLastText = t, _micEnergyHistory, _micBackpressure);
+        () => _micLastText, t => _micLastText = t, _micEnergyHistory, _micBackpressure,
+        () => _micOverlap, o => _micOverlap = o);
 
     private void SpkProcessLoop() => VadProcessLoop("相手", _spkBufLock, _speakerBuffer,
         () => _spkLastVoiceTime, () => _spkLastPrompt, p => _spkLastPrompt = p,
-        () => _spkLastText, t => _spkLastText = t, _spkEnergyHistory, _spkBackpressure);
+        () => _spkLastText, t => _spkLastText = t, _spkEnergyHistory, _spkBackpressure,
+        () => _spkOverlap, o => _spkOverlap = o);
 
     /// <summary>
     /// VAD ベースの認識ループ。
@@ -343,7 +369,9 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         Func<string> getLastText,
         Action<string> setLastText,
         Queue<float> energyHistory,
-        BackpressureMonitor backpressure)
+        BackpressureMonitor backpressure,
+        Func<byte[]?> getOverlap,
+        Action<byte[]?> setOverlap)
     {
         while (!_stopping)
         {
@@ -382,10 +410,37 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 {
                     // ToArray のメモリ倍増を最小化: Position ベースで読み出す
                     int len = (int)buffer.Length;
-                    pcmData = new byte[len];
+                    byte[] rawData = new byte[len];
                     buffer.Position = 0;
-                    buffer.Read(pcmData, 0, len);
+                    buffer.Read(rawData, 0, len);
                     buffer.SetLength(0);
+
+                    // 前チャンク末尾のオーバーラップを先頭に結合
+                    byte[]? overlap = getOverlap();
+                    if (overlap != null && overlap.Length > 0)
+                    {
+                        pcmData = new byte[overlap.Length + rawData.Length];
+                        Buffer.BlockCopy(overlap, 0, pcmData, 0, overlap.Length);
+                        Buffer.BlockCopy(rawData, 0, pcmData, overlap.Length, rawData.Length);
+                    }
+                    else
+                    {
+                        pcmData = rawData;
+                    }
+
+                    // 次のチャンクのために末尾を保存
+                    int overlapBytes = (int)(OverlapSec * TargetFormat.SampleRate * 2);
+                    overlapBytes = overlapBytes - (overlapBytes % 2); // サンプル境界にアライン
+                    if (rawData.Length > overlapBytes)
+                    {
+                        byte[] newOverlap = new byte[overlapBytes];
+                        Buffer.BlockCopy(rawData, rawData.Length - overlapBytes, newOverlap, 0, overlapBytes);
+                        setOverlap(newOverlap);
+                    }
+                    else
+                    {
+                        setOverlap(null);
+                    }
                 }
             }
 
@@ -420,9 +475,23 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             int len = (int)buffer.Length;
             if (len > 0)
             {
-                remaining = new byte[len];
+                byte[] rawData = new byte[len];
                 buffer.Position = 0;
-                buffer.Read(remaining, 0, len);
+                buffer.Read(rawData, 0, len);
+
+                // 前チャンク末尾のオーバーラップを先頭に結合
+                byte[]? overlap = getOverlap();
+                if (overlap != null && overlap.Length > 0)
+                {
+                    remaining = new byte[overlap.Length + rawData.Length];
+                    Buffer.BlockCopy(overlap, 0, remaining, 0, overlap.Length);
+                    Buffer.BlockCopy(rawData, 0, remaining, overlap.Length, rawData.Length);
+                }
+                else
+                {
+                    remaining = rawData;
+                }
+                setOverlap(null);
             }
             else
             {
@@ -463,9 +532,24 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                     ? Math.Min(_maxCpuThreads, Math.Max(1, Environment.ProcessorCount - 2))
                     : Math.Max(1, Environment.ProcessorCount - 4);
 
-                var builder = _factory.CreateBuilder()
+                // ── ビームサーチデコーディング (greedy → beam search で精度向上) ──
+                var beamStrategy = (BeamSearchSamplingStrategyBuilder)_factory.CreateBuilder()
+                    .WithBeamSearchSamplingStrategy();
+                var builder = beamStrategy
+                    .WithBeamSize(5)
+                    .WithPatience(1.0f)
+                    .ParentBuilder
                     .WithLanguage(_language)
-                    .WithThreads(whisperThreads);
+                    .WithThreads(whisperThreads)
+                    // ── Temperature 0 (決定論的) + フォールバック ──
+                    .WithTemperature(0f)
+                    .WithTemperatureInc(0.2f)
+                    // ── 品質フィルタ閾値 ──
+                    .WithEntropyThreshold(2.4f)
+                    .WithLogProbThreshold(-1.0f)
+                    .WithNoSpeechThreshold(0.6f)
+                    // ── チャンク内セグメント間のプロンプト引き継ぎ ──
+                    .WithCarryInitialPrompt(true);
 
                 // 前回の認識結果を prompt として渡し、文脈を維持
                 if (!string.IsNullOrEmpty(prompt))
@@ -534,14 +618,6 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             return "";
         }
     }
-
-    // ────────────────────────────────────────────────
-    //  音声変換ユーティリティ (共通関数へ委譲)
-    // ────────────────────────────────────────────────
-
-    private static byte[] ConvertAudio(
-        byte[] source, int length, WaveFormat sourceFormat, WaveFormat targetFormat)
-        => AudioProcessing.ConvertLoopbackToTarget(source, length, sourceFormat, targetFormat);
 
     // ────────────────────────────────────────────────
     //  停止

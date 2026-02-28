@@ -84,11 +84,13 @@ public sealed class TranscriptWriter : IDisposable
     /// </summary>
     public void Close()
     {
-        if (_disposed || _closed) return;
-        _closed = true;
+        if (_disposed) return;
 
         lock (_writer)
         {
+            if (_closed) return;
+            _closed = true;
+
             _writer.WriteLine();
             _writer.WriteLine(new string('=', 60));
 

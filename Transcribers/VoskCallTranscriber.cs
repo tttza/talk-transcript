@@ -324,13 +324,6 @@ public sealed class VoskCallTranscriber : ICallTranscriber
     }
 
     // ────────────────────────────────────────────────
-    //  音声フォーマット変換 (共通関数へ委譲)
-    // ────────────────────────────────────────────────
-    private static byte[] ConvertAudio(
-        byte[] source, int length, WaveFormat sourceFormat, WaveFormat targetFormat)
-        => AudioProcessing.ConvertLoopbackToTarget(source, length, sourceFormat, targetFormat);
-
-    // ────────────────────────────────────────────────
     //  停止
     // ────────────────────────────────────────────────
     public void Stop()
@@ -380,11 +373,6 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         {
             AppLogger.Warn("[Vosk] スピーカー処理スレッドがタイムアウト — FinalResult をスキップ");
         }
-
-        long micBytes = _micRecording.Length;
-        long spkBytes = _speakerRecording.Length;
-
-
     }
 
     // ────────────────────────────────────────────────

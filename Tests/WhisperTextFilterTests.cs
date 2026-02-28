@@ -97,7 +97,7 @@ public class WhisperTextFilterTests
     [Fact]
     public void NormalizeText_CollapsesSpaces()
     {
-        Assert.Equal("今日は 天気が いい", WhisperTextFilter.NormalizeText("今日は　 天気が  いい"));
+        Assert.Equal("今日は天気がいい", WhisperTextFilter.NormalizeText("今日は　 天気が  いい"));
     }
 
     [Fact]
@@ -111,5 +111,27 @@ public class WhisperTextFilterTests
     {
         Assert.Equal("", WhisperTextFilter.NormalizeText(""));
         Assert.Equal("", WhisperTextFilter.NormalizeText("  "));
+    }
+
+    [Fact]
+    public void NormalizeText_RemovesSpacesBetweenJapaneseChars()
+    {
+        // ひらがな間
+        Assert.Equal("こんにちは", WhisperTextFilter.NormalizeText("こん にち は"));
+        // カタカナ間
+        Assert.Equal("テスト", WhisperTextFilter.NormalizeText("テ ス ト"));
+        // 漢字間
+        Assert.Equal("東京都", WhisperTextFilter.NormalizeText("東京 都"));
+        // 混合
+        Assert.Equal("今日はテストです", WhisperTextFilter.NormalizeText("今日 は テスト です"));
+    }
+
+    [Fact]
+    public void NormalizeText_PreservesSpacesAroundEnglish()
+    {
+        // 英語の単語間スペースは保持
+        Assert.Equal("hello world", WhisperTextFilter.NormalizeText("hello world"));
+        // 日本語と英語の間のスペースも保持
+        Assert.Equal("これは test です", WhisperTextFilter.NormalizeText("これは test です"));
     }
 }

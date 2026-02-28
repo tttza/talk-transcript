@@ -95,7 +95,7 @@ internal sealed class BackpressureMonitor
     /// <param name="bytesPerSample">1サンプルのバイト数 (通常2 = 16bit)</param>
     public long GetBufferCapacityBytes(int sampleRate, int bytesPerSample = 2)
     {
-        long delayBased = (long)(CurrentMaxBufferSec * 2 * sampleRate * bytesPerSample);
+        long delayBased = (long)(CurrentMaxBufferSec * sampleRate * bytesPerSample);
         return MemoryHelper.ClampToAvailableMemory(delayBased);
     }
 }

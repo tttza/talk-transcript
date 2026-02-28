@@ -149,14 +149,6 @@ public sealed class SpeakerTranscriber : IDisposable
     }
 
     /// <summary>
-    /// ループバック音声を認識エンジンが受け付けるフォーマット (16 kHz / 16 bit / mono) に変換する。
-    /// WASAPI は通常 IEEE Float 32bit で返すため、リニア補間で高品質にリサンプリングする。
-    /// </summary>
-    private static byte[] ConvertAudio(
-        byte[] source, int length, WaveFormat sourceFormat, WaveFormat targetFormat)
-        => AudioProcessing.ConvertLoopbackToTarget(source, length, sourceFormat, targetFormat);
-
-    /// <summary>
     /// 音声が認識されたときの処理。
     /// </summary>
     private void OnSpeechRecognized(object? sender, SpeechRecognizedEventArgs e)

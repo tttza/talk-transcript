@@ -15,6 +15,15 @@ namespace TalkTranscript.Transcribers;
 /// </summary>
 internal static class WhisperTextFilter
 {
+    // ── 日本語文字間の不要なスペースを除去する正規表現 ──
+    // Whisper は日本語の形態素間にスペースを挿入する傾向がある。
+    // ひらがな・カタカナ・漢字・CJK句読点の間のスペースを除去する。
+    private static readonly Regex JapaneseInterCharSpacePattern = new(
+        @"(?<=[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\u3000-\u303F\uFF00-\uFF60\uFFE0-\uFFEF])" +
+        @"\s+" +
+        @"(?=[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\u3000-\u303F\uFF00-\uFF60\uFFE0-\uFFEF])",
+        RegexOptions.Compiled);
+
     // ── ハルシネーションとして既知のパターン (正規表現) ──
     private static readonly Regex[] HallucinationPatterns = new[]
     {
@@ -131,6 +140,9 @@ internal static class WhisperTextFilter
 
         // 連続する空白を1つに
         result = Regex.Replace(result, @"\s{2,}", " ");
+
+        // 日本語文字間のスペースを除去 (Whisper が形態素間に挿入するスペース対策)
+        result = JapaneseInterCharSpacePattern.Replace(result, "");
 
         // 先頭末尾の不要な句読点を除去
         result = result.TrimStart('、', ',', '。', '.', '　', ' ');

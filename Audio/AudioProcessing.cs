@@ -17,8 +17,8 @@ internal static class AudioProcessing
     /// WASAPI ループバック (IEEE Float 32bit/マルチチャンネル) を
     /// 16kHz / 16bit / mono に変換する。
     ///
-    /// 単純デシメーション (間引き) ではなくリニア補間を使用し、
-    /// エイリアシングアーティファクトを低減する。
+    /// ローパスフィルタ (移動平均) でアンチエイリアシングを行い、
+    /// リニア補間でリサンプリングする。
     ///
     /// 入力・出力ともに ArrayPool を使用し、コールバック内での GC 圧力を最小化する。
     /// </summary>
@@ -49,6 +49,38 @@ internal static class AudioProcessing
 
             // リサンプリング比率
             double ratio = (double)sourceFormat.SampleRate / targetFormat.SampleRate;
+
+            // ── アンチエイリアシング: 移動平均ローパスフィルタ ──
+            // ダウンサンプリング前にナイキスト周波数以上の成分を除去する。
+            // フィルタ窓幅 = ceil(ratio) で十分な減衰が得られる。
+            int filterWidth = Math.Max(1, (int)Math.Ceiling(ratio));
+            if (filterWidth > 1)
+            {
+                float[] filtered = ArrayPool<float>.Shared.Rent(sampleCount);
+                try
+                {
+                    for (int i = 0; i < sampleCount; i++)
+                    {
+                        int halfW = filterWidth / 2;
+                        int left = Math.Max(0, i - halfW);
+                        int right = Math.Min(sampleCount - 1, i + halfW);
+                        int count = right - left + 1;
+
+                        float s = 0f;
+                        for (int j = left; j <= right; j++)
+                            s += monoSamples[j];
+                        filtered[i] = s / count;
+                    }
+
+                    // フィルタ結果をコピー
+                    Array.Copy(filtered, monoSamples, sampleCount);
+                }
+                finally
+                {
+                    ArrayPool<float>.Shared.Return(filtered);
+                }
+            }
+
             int outputSamples = (int)(sampleCount / ratio);
             if (outputSamples == 0) return Array.Empty<byte>();
 
