@@ -208,9 +208,7 @@ internal sealed class SpectreUI
             int step = key.Key == ConsoleKey.PageUp ? 10 : 1;
             lock (_lock)
             {
-                int maxEntries;
-                try { maxEntries = Math.Max(3, Console.WindowHeight - 7); }
-                catch { maxEntries = 20; }
+                int maxEntries = EstimateMaxEntries();
                 int maxOffset = Math.Max(0, _entries.Count - maxEntries);
                 _scrollOffset = Math.Min(_scrollOffset + step, maxOffset);
                 _lastScrollTime = DateTime.Now;
@@ -229,9 +227,7 @@ internal sealed class SpectreUI
         {
             lock (_lock)
             {
-                int maxEntries;
-                try { maxEntries = Math.Max(3, Console.WindowHeight - 7); }
-                catch { maxEntries = 20; }
+                int maxEntries = EstimateMaxEntries();
                 _scrollOffset = Math.Max(0, _entries.Count - maxEntries);
                 _lastScrollTime = DateTime.Now;
             }
@@ -248,34 +244,18 @@ internal sealed class SpectreUI
         var elapsed = DateTime.Now - _startTime;
         var rows = new List<IRenderable>();
 
-        // ── ステータス + 音量 (1行にまとめる) ──
-        var statusParts = new List<string> { "[green]●[/]" };
-        statusParts.Add($"{elapsed:hh\\:mm\\:ss}");
-        if (_isTest)
-            statusParts.Add($"[magenta]テスト({_testSeconds}秒)[/]");
-        statusParts.Add(BuildVolumeBar("🎤", _micVolume, "cyan"));
-        statusParts.Add(BuildVolumeBar("🔊", _speakerVolume, "yellow"));
-        rows.Add(new Markup("  " + string.Join("  ", statusParts)));
-
-        rows.Add(new Rule().RuleStyle("dim"));
-
-        // ── 文字起こし結果 ──
-        int maxEntries;
-        // 固定行: バナー(2) + ステータス(1) + 区切り線(1) + フッター(3) = 7
-        try { maxEntries = Math.Max(3, Console.WindowHeight - 7); }
-        catch { maxEntries = 20; }
-
+        // ── 文字起こし結果 (上部: スクロール可能領域) ──
         List<TranscriptEntry> visible;
         Dictionary<string, double> proc;
         int totalEntries, scrollOff, hiddenAbove, hiddenBelow;
         lock (_lock)
         {
+            int maxEntries = EstimateMaxEntries();
             totalEntries = _entries.Count;
             scrollOff = _scrollOffset;
-            // 表示範囲: 末尾から scrollOffset 分戻った位置を基準に maxEntries 件表示
-            int endIdx = totalEntries - scrollOff;            // 表示末尾 (exclusive)
-            int startIdx = Math.Max(0, endIdx - maxEntries);  // 表示先頭
-            endIdx = Math.Max(startIdx, endIdx);              // 安全ガード
+            int endIdx = totalEntries - scrollOff;
+            int startIdx = Math.Max(0, endIdx - maxEntries);
+            endIdx = Math.Max(startIdx, endIdx);
             visible = _entries.GetRange(startIdx, endIdx - startIdx);
             hiddenAbove = startIdx;
             hiddenBelow = totalEntries - endIdx;
@@ -289,9 +269,7 @@ internal sealed class SpectreUI
 
         // ── スクロール位置インジケーター (上方向) ──
         if (hiddenAbove > 0)
-        {
             rows.Add(new Markup($"  [dim]  ↑ さらに {hiddenAbove} 件[/]"));
-        }
 
         foreach (var entry in visible)
         {
@@ -305,9 +283,7 @@ internal sealed class SpectreUI
 
         // ── スクロール位置インジケーター (下方向) ──
         if (hiddenBelow > 0)
-        {
             rows.Add(new Markup($"  [dim]  ↓ さらに {hiddenBelow} 件 (最新)[/]"));
-        }
 
         // ── 処理中インジケーター (スピナー) ──
         foreach (var (speaker, dur) in proc)
@@ -316,8 +292,46 @@ internal sealed class SpectreUI
                 $"  [yellow]{spinnerFrame}[/] [dim][[{Markup.Escape(speaker)}]] {dur:F1}秒の音声を処理中...[/]"));
         }
 
-        // ── フッター (キー操作ガイド: 常に表示) ──
-        rows.Add(new Text(""));
+        // ── 下部固定領域を画面最下部に押し下げるパディング ──
+        // 下部固定行数: 区切り線(1) + バナー(1-2) + ステータス(1) + 区切り線(1) + キーガイド(1) = 5-6
+        int bannerLines = _isTest ? 2 : 1;
+        int footerLines = 1 + bannerLines + 1 + 1 + (_isTest ? 0 : 1);
+        int usedLines = rows.Count + proc.Count; // 上部で使った行数 (proc は rows に含まれている)
+        int windowHeight;
+        try { windowHeight = Console.WindowHeight; }
+        catch { windowHeight = 30; }
+        int padding = Math.Max(0, windowHeight - (rows.Count + footerLines));
+        for (int i = 0; i < padding; i++)
+            rows.Add(new Text(""));
+
+        // ═══════════════════════════════════════════════
+        //  下部固定領域 (常に最下部に表示される)
+        // ═══════════════════════════════════════════════
+        rows.Add(new Rule().RuleStyle("dim"));
+
+        // ── バナー (エンジン・デバイス・ファイル) ──
+        var gpuTag = _engine.StartsWith("whisper")
+            ? (_useGpu ? "[green]GPU[/]" : "[dim]CPU[/]")
+            : "";
+        if (_isTest)
+            rows.Add(new Markup($"  [magenta][[テストモード]] {_testSeconds}秒後に自動停止[/]"));
+        rows.Add(new Markup(
+            $"  [white bold]{Markup.Escape(_engine.ToUpperInvariant())}[/]" +
+            (gpuTag.Length > 0 ? $" ({gpuTag})" : "") +
+            $"  [dim]│[/]  [cyan]🎤 {Markup.Escape(TruncateDevice(_micName))}[/]" +
+            $"  [dim]│[/]  [yellow]🔊 {Markup.Escape(TruncateDevice(_speakerName))}[/]" +
+            $"  [dim]│[/]  [dim]→[/] {Markup.Escape(_fileName)}"));
+
+        // ── ステータス + 音量バー ──
+        var statusParts = new List<string> { "[green]●[/]" };
+        statusParts.Add($"{elapsed:hh\\:mm\\:ss}");
+        if (_isTest)
+            statusParts.Add($"[magenta]テスト({_testSeconds}秒)[/]");
+        statusParts.Add(BuildVolumeBar("🎤", _micVolume, "cyan"));
+        statusParts.Add(BuildVolumeBar("🔊", _speakerVolume, "yellow"));
+        rows.Add(new Markup("  " + string.Join("  ", statusParts)));
+
+        // ── キー操作ガイド ──
         rows.Add(new Rule().RuleStyle("dim"));
         if (!_isTest)
         {
@@ -354,31 +368,29 @@ internal sealed class SpectreUI
         return $"{icon} [{color}]{bar}[/] [dim]{dbStr}[/]";
     }
 
+    /// <summary>現在の端末サイズと状態から表示可能なエントリ数を見積もる</summary>
+    private int EstimateMaxEntries()
+    {
+        // 下部固定領域: 区切り線(1) + バナー(1-2) + ステータス+音量(1) + 区切り線(1) + キーガイド(1) = 5-6
+        // + スピナー行 + スクロールインジケーター(最大2)
+        int bannerLines = _isTest ? 2 : 1;
+        int overhead = 1 + bannerLines + 1 + 1 + 1 + _processing.Count + 2;
+        try { return Math.Max(3, Console.WindowHeight - overhead); }
+        catch { return 20; }
+    }
+
     // ══════════════════════════════════════════════════
     //  静的ヘルパー (Live 表示の前後で使用)
     // ══════════════════════════════════════════════════
 
-    /// <summary>バナーを表示する</summary>
+    /// <summary>バナーを表示する (Live セッション外で使用)</summary>
     public static void PrintBanner(string engine, bool useGpu, string mic,
                                    string speaker, string fileName,
                                    bool test, int sec)
     {
-        AnsiConsole.WriteLine();
-
-        if (test)
-            AnsiConsole.MarkupLine($"  [magenta][[テストモード]] {sec}秒後に自動停止[/]");
-
-        var gpuTag = engine.StartsWith("whisper")
-            ? (useGpu ? "[green]GPU[/]" : "[dim]CPU[/]")
-            : "";
-
-        // 1行目: エンジン + デバイス
-        AnsiConsole.MarkupLine(
-            $"  [white bold]{Markup.Escape(engine.ToUpperInvariant())}[/]" +
-            (gpuTag.Length > 0 ? $" ({gpuTag})" : "") +
-            $"  [dim]│[/]  [cyan]🎤 {Markup.Escape(TruncateDevice(mic))}[/]" +
-            $"  [dim]│[/]  [yellow]🔊 {Markup.Escape(TruncateDevice(speaker))}[/]" +
-            $"  [dim]│[/]  [dim]→[/] {Markup.Escape(fileName)}");
+        // Live セッション内ではバナーは BuildDisplay() が描画するため、
+        // ここではセッション開始前の一瞬だけ表示される。
+        // (Live 表示が開始されると自動的にクリアされる)
     }
 
     /// <summary>デバイス名が長い場合に短縮する</summary>
