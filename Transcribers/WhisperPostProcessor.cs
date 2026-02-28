@@ -33,7 +33,8 @@ public static class WhisperPostProcessor
         byte[] speakerPcm,
         DateTime callStartTime,
         bool useGpu = true,
-        string language = "ja")
+        string language = "ja",
+        int maxCpuThreads = 0)
     {
         var entries = new List<TranscriptEntry>();
 
@@ -45,7 +46,7 @@ public static class WhisperPostProcessor
         if (micPcm.Length > 0)
         {
             Console.WriteLine($"[Whisper] マイク音声を処理中 ({micPcm.Length / 1024}KB)...");
-            var micEntries = await ProcessSingleAsync(factory, micPcm, "自分", callStartTime, language);
+            var micEntries = await ProcessSingleAsync(factory, micPcm, "自分", callStartTime, language, maxCpuThreads);
             entries.AddRange(micEntries);
             Console.WriteLine($"[Whisper] マイク: {micEntries.Count} セグメント認識");
         }
@@ -54,7 +55,7 @@ public static class WhisperPostProcessor
         if (speakerPcm.Length > 0)
         {
             Console.WriteLine($"[Whisper] スピーカー音声を処理中 ({speakerPcm.Length / 1024}KB)...");
-            var spkEntries = await ProcessSingleAsync(factory, speakerPcm, "相手", callStartTime, language);
+            var spkEntries = await ProcessSingleAsync(factory, speakerPcm, "相手", callStartTime, language, maxCpuThreads);
             entries.AddRange(spkEntries);
             Console.WriteLine($"[Whisper] スピーカー: {spkEntries.Count} セグメント認識");
         }
@@ -74,13 +75,19 @@ public static class WhisperPostProcessor
         byte[] pcm16bit,
         string speaker,
         DateTime callStartTime,
-        string language = "ja")
+        string language = "ja",
+        int maxCpuThreads = 0)
     {
         var entries = new List<TranscriptEntry>();
 
+        // スレッド数: maxCpuThreads > 0 ならユーザー指定値、0 なら CPU コア数の半分
+        int threads = maxCpuThreads > 0
+            ? Math.Min(maxCpuThreads, Math.Max(1, Environment.ProcessorCount - 1))
+            : Math.Max(1, Environment.ProcessorCount / 2);
+
         using var processor = factory.CreateBuilder()
             .WithLanguage(language)
-            .WithThreads(Math.Max(1, Environment.ProcessorCount / 2))
+            .WithThreads(threads)
             .Build();
 
         using var stream = new MemoryStream();

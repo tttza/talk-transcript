@@ -129,11 +129,15 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     /// <summary>Whisper 処理完了時に発火 (speaker)</summary>
     public event Action<string>? OnProcessingCompleted;
 
+    /// <summary>Whisper 推論スレッド数 (0 = 自動)</summary>
+    private readonly int _maxCpuThreads;
+
     /// <param name="whisperModelPath">Whisper GGML モデルファイルへのパス</param>
     /// <param name="modelSize">モデル名 (ログ表示用: "tiny", "base" など)</param>
     /// <param name="useGpu">true で GPU (CUDA) を使用</param>
     /// <param name="language">認識言語 ("ja", "en", "auto" など)</param>
     /// <param name="enableRecording">true で録音バッファを保持する (後処理用)</param>
+    /// <param name="maxCpuThreads">Whisper 推論スレッド数 (0 = 自動)</param>
     public WhisperCallTranscriber(
         string whisperModelPath,
         string modelSize,
@@ -141,11 +145,13 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         MMDevice speakerDevice,
         bool useGpu = true,
         string language = "ja",
-        bool enableRecording = false)
+        bool enableRecording = false,
+        int maxCpuThreads = 0)
     {
         _factory = WhisperFactory.FromPath(whisperModelPath, new WhisperFactoryOptions { UseGpu = useGpu });
         _modelSize = modelSize;
         _language = language;
+        _maxCpuThreads = maxCpuThreads;
         _micRecording = new RecordingBuffer(enableRecording);
         _speakerRecording = new RecordingBuffer(enableRecording);
 
@@ -448,10 +454,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             List<(TimeSpan Start, TimeSpan End, string Text)> results;
             try
             {
-                // オーディオスレッド (mic/spk キャプチャ + VAD ポーリング) 用に
-                // 最低4コアを確保し、残りを Whisper に割り当て
-                int reservedCores = 4;
-                int whisperThreads = Math.Max(1, Environment.ProcessorCount - reservedCores);
+                // Whisper 推論スレッド数を決定:
+                // _maxCpuThreads > 0 ならユーザー指定値を使用、
+                // 0 ならオーディオスレッド用に4コアを確保し残りを割り当て
+                int whisperThreads = _maxCpuThreads > 0
+                    ? Math.Min(_maxCpuThreads, Math.Max(1, Environment.ProcessorCount - 2))
+                    : Math.Max(1, Environment.ProcessorCount - 4);
 
                 var builder = _factory.CreateBuilder()
                     .WithLanguage(_language)

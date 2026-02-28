@@ -35,6 +35,7 @@ internal static class ConfigMenu
             ("出力フォーマット",   () => ConfigureOutputFormats(settings)),
             ("デバイス",         () => ConfigureDevices(settings)),
             ("録音保存",         () => ConfigureRecording(settings)),
+            ("リソース制御",     () => ConfigureResources(settings)),
             ("設定をリセット",    () => ResetSettings(settings)),
         };
 
@@ -92,6 +93,13 @@ internal static class ConfigMenu
         table.AddRow("出力フォーマット", Markup.Escape(formats));
 
         table.AddRow("録音保存", settings.SaveRecording ? "[green]有効[/]" : "[dim]無効[/]");
+
+        string threadDisplay = settings.MaxCpuThreads > 0
+            ? $"{settings.MaxCpuThreads} スレッド"
+            : $"自動 ({Math.Max(1, Environment.ProcessorCount - 4)} / {Environment.ProcessorCount} コア)";
+        table.AddRow("CPU スレッド数", Markup.Escape(threadDisplay));
+        table.AddRow("プロセス優先度", Markup.Escape(FormatPriorityDisplay(settings.ProcessPriority)));
+
         table.AddRow("マイク", Markup.Escape(settings.MicrophoneDeviceName ?? "(未設定)"));
         table.AddRow("スピーカー", Markup.Escape(settings.SpeakerDeviceName ?? "(未設定)"));
 
@@ -248,6 +256,109 @@ internal static class ConfigMenu
         AnsiConsole.WriteLine();
     }
 
+    private static void ConfigureResources(AppSettings settings)
+    {
+        SpectreUI.PrintSectionHeader("リソース制御");
+
+        int totalCores = Environment.ProcessorCount;
+        int currentThreads = settings.MaxCpuThreads > 0
+            ? settings.MaxCpuThreads
+            : Math.Max(1, totalCores - 4);
+
+        AnsiConsole.MarkupLine($"  [dim]CPU コア数: {totalCores}[/]");
+        AnsiConsole.MarkupLine($"  [dim]現在のスレッド数: {currentThreads}[/]");
+        AnsiConsole.WriteLine();
+
+        // ── CPU スレッド数 ──
+        var threadChoices = new List<string>();
+        for (int t = 1; t <= Math.Max(1, totalCores - 2); t++)
+        {
+            string label = t == 1 ? "1 (最小 — 他のアプリ優先)"
+                         : t <= totalCores / 4 ? $"{t} (軽量)"
+                         : t <= totalCores / 2 ? $"{t} (バランス)"
+                         : $"{t} (高速 — PC が重くなる可能性あり)";
+            threadChoices.Add(label);
+        }
+        threadChoices.Insert(0, $"自動 ({Math.Max(1, totalCores - 4)} スレッド)");
+
+        var threadChoice = AnsiConsole.Prompt(
+            new SelectionPrompt<string>()
+                .Title("[cyan]  Whisper の CPU スレッド数を選択:[/]")
+                .PageSize(12)
+                .HighlightStyle(Style.Parse("bold cyan"))
+                .AddChoices(threadChoices));
+
+        if (threadChoice.StartsWith("自動"))
+        {
+            settings.MaxCpuThreads = 0;
+        }
+        else
+        {
+            // "N (...)" からNを抽出
+            var numStr = threadChoice.Split(' ')[0];
+            if (int.TryParse(numStr, out int threads))
+                settings.MaxCpuThreads = threads;
+        }
+        AnsiConsole.MarkupLine($"  [green]→ スレッド数: {(settings.MaxCpuThreads > 0 ? settings.MaxCpuThreads.ToString() : "自動")}[/]");
+        AnsiConsole.WriteLine();
+
+        // ── プロセス優先度 ──
+        var priorityChoices = new[]
+        {
+            "Normal — 通常 (デフォルト)",
+            "BelowNormal — やや低い (他アプリと共存しやすい)",
+            "Idle — 最低 (他アプリが完全に優先される)",
+        };
+
+        var priorityChoice = AnsiConsole.Prompt(
+            new SelectionPrompt<string>()
+                .Title("[cyan]  プロセス優先度を選択:[/]")
+                .HighlightStyle(Style.Parse("bold cyan"))
+                .AddChoices(priorityChoices));
+
+        settings.ProcessPriority = priorityChoice.Split(' ')[0];
+        AnsiConsole.MarkupLine($"  [green]→ 優先度: {FormatPriorityDisplay(settings.ProcessPriority)}[/]");
+
+        settings.Save();
+        AnsiConsole.WriteLine();
+
+        // 即時反映
+        ApplyProcessPriority(settings.ProcessPriority);
+        AnsiConsole.MarkupLine("  [dim]設定を反映しました。スレッド数は次のセッションから適用されます。[/]");
+        AnsiConsole.WriteLine();
+    }
+
+    /// <summary>プロセス優先度を適用する</summary>
+    internal static void ApplyProcessPriority(string? priority)
+    {
+        try
+        {
+            var p = System.Diagnostics.Process.GetCurrentProcess();
+            p.PriorityClass = priority?.ToLowerInvariant() switch
+            {
+                "belownormal" => System.Diagnostics.ProcessPriorityClass.BelowNormal,
+                "idle"        => System.Diagnostics.ProcessPriorityClass.Idle,
+                _             => System.Diagnostics.ProcessPriorityClass.Normal,
+            };
+            AppLogger.Info($"プロセス優先度を {priority ?? "Normal"} に設定");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"プロセス優先度の変更に失敗: {ex.Message}");
+        }
+    }
+
+    /// <summary>優先度設定の表示用文字列</summary>
+    internal static string FormatPriorityDisplay(string? priority)
+    {
+        return priority?.ToLowerInvariant() switch
+        {
+            "belownormal" => "BelowNormal (やや低い)",
+            "idle"        => "Idle (最低)",
+            _             => "Normal (通常)",
+        };
+    }
+
     private static void ResetSettings(AppSettings settings)
     {
         if (AnsiConsole.Confirm("  [yellow]すべての設定をリセットしますか?[/]", false))
@@ -270,6 +381,8 @@ internal static class ConfigMenu
             settings.SpeakerDeviceId = fresh.SpeakerDeviceId;
             settings.SpeakerDeviceName = fresh.SpeakerDeviceName;
             settings.SaveRecording = fresh.SaveRecording;
+            settings.MaxCpuThreads = fresh.MaxCpuThreads;
+            settings.ProcessPriority = fresh.ProcessPriority;
 
             AnsiConsole.MarkupLine("  [green]設定をリセットしました。[/]");
         }

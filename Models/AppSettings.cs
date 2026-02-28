@@ -36,6 +36,20 @@ public class AppSettings
     /// <summary>録音データを WAV ファイルとして保存するか</summary>
     public bool SaveRecording { get; set; } = false;
 
+    /// <summary>
+    /// Whisper 推論に使用する最大 CPU スレッド数。
+    /// 0 = 自動 (CPU コア数 - 4、最低 1)。
+    /// 値を小さくすると CPU 負荷が下がり PC が軽くなる。
+    /// </summary>
+    public int MaxCpuThreads { get; set; } = 0;
+
+    /// <summary>
+    /// プロセス優先度。
+    /// "Normal" (通常) / "BelowNormal" (やや低い) / "Idle" (最低) から選択。
+    /// 低い優先度にすると他のアプリの動作を妨げにくくなる。
+    /// </summary>
+    public string ProcessPriority { get; set; } = "Normal";
+
     /// <summary>追加の出力フォーマット (テキスト出力は常に行われる)</summary>
     [JsonConverter(typeof(OutputFormatsConverter))]
     public List<OutputFormat>? OutputFormats { get; set; }

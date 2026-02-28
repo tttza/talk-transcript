@@ -26,6 +26,9 @@ int testSeconds = 12;
 var hwProfile = HardwareInfo.Detect();
 var settings = AppSettings.Load();
 
+// ── プロセス優先度の適用 ──
+ConfigMenu.ApplyProcessPriority(settings.ProcessPriority);
+
 // エンジン選択: --engine 引数 > 設定ファイル > 環境推奨
 string engineName;
 bool useGpu;
@@ -205,7 +208,7 @@ while (!quit)
     {
         string wModelPath = await ModelManager.EnsureWhisperModelAsync(whisperModelSize);
         callTranscriber = new WhisperCallTranscriber(wModelPath, whisperModelSize, micDevice, speakerDevice, useGpu, language,
-            enableRecording: settings.SaveRecording);
+            enableRecording: settings.SaveRecording, maxCpuThreads: settings.MaxCpuThreads);
     }
     else if (engineName == "vosk")
     {
@@ -333,11 +336,22 @@ while (!quit)
             ConfigMenu.Show(hwProfile);
             // 設定を再読み込み
             settings = AppSettings.Load();
-            engineName = (settings.EngineName ?? hwProfile.RecommendedEngine).ToLowerInvariant();
-            useGpu = settings.UseGpu;
-            language = !string.IsNullOrEmpty(settings.Language) ? settings.Language : "ja";
-            // 出力フォーマット再読み込み
-            extraFormats = settings.OutputFormats ?? new List<OutputFormat>();
+            // --engine 引数が指定されていればそちらを優先
+            if (engineIdx < 0)
+            {
+                engineName = (settings.EngineName ?? hwProfile.RecommendedEngine).ToLowerInvariant();
+                useGpu = settings.EngineName != null ? settings.UseGpu : hwProfile.RecommendedUseGpu;
+            }
+            // プロセス優先度を再適用
+            ConfigMenu.ApplyProcessPriority(settings.ProcessPriority);
+            // --lang 引数が指定されていればそちらを優先
+            if (langIdx < 0)
+                language = !string.IsNullOrEmpty(settings.Language) ? settings.Language : "ja";
+            // 出力フォーマット再読み込み (--format 引数がなければ設定から)
+            var argsFormats = EngineSelector.ParseFormats(args);
+            extraFormats = argsFormats.Count > 0
+                ? argsFormats
+                : (settings.OutputFormats ?? new List<OutputFormat>());
             // デバイス再読み込み
             try
             {
@@ -412,7 +426,7 @@ void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
         try
         {
             var whisperEntries = WhisperPostProcessor.ProcessAsync(
-                whisperPostModelPath, micPcm, spkPcm, callStart, useGpu, lang).GetAwaiter().GetResult();
+                whisperPostModelPath, micPcm, spkPcm, callStart, useGpu, lang, settings.MaxCpuThreads).GetAwaiter().GetResult();
             if (whisperEntries.Count > 0)
             {
                 w.Close();
