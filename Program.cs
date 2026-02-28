@@ -291,6 +291,7 @@ while (!quit)
         ui.AddEntry(bookmark);
         writer?.Append(bookmark);
         jsonWriter?.Append(bookmark);
+        allEntries.Add(bookmark);
         AppLogger.Info("ブックマークを追加しました");
     };
 
@@ -379,6 +380,36 @@ while (!quit)
             extraFormats = argsFormats.Count > 0
                 ? argsFormats
                 : (settings.OutputFormats ?? new List<OutputFormat>());
+            // writer / jsonWriter を新しいフォーマット設定に合わせて再生成
+            hasFormatConfig = extraFormats.Count > 0;
+            bool newOutputText = !hasFormatConfig || extraFormats.Contains(OutputFormat.Text);
+            if (newOutputText && !outputText)
+            {
+                // テキスト出力が新たに有効化された
+                writer = new TranscriptWriter(filePath);
+            }
+            else if (!newOutputText && outputText)
+            {
+                // テキスト出力が無効化された
+                writer?.Close();
+                writer?.Dispose();
+                writer = null;
+            }
+            outputText = newOutputText;
+
+            bool newOutputJson = extraFormats.Contains(OutputFormat.Json);
+            if (newOutputJson && !outputJson)
+            {
+                // JSON 出力が新たに有効化された
+                jsonWriter = new IncrementalJsonWriter(jsonPath);
+            }
+            else if (!newOutputJson && outputJson)
+            {
+                // JSON 出力が無効化された (NDJSON のまま閉じる)
+                jsonWriter?.Dispose();
+                jsonWriter = null;
+            }
+            outputJson = newOutputJson;
             // デバイス再読み込み
             try
             {

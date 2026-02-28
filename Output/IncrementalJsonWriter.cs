@@ -104,17 +104,20 @@ public sealed class IncrementalJsonWriter : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        try
+        lock (_lock)
         {
-            if (!_closed)
+            if (_disposed) return;
+            _disposed = true;
+            try
             {
-                _writer.Flush();
-                _writer.Dispose();
+                if (!_closed)
+                {
+                    _writer.Flush();
+                    _writer.Dispose();
+                }
             }
+            catch { }
         }
-        catch { }
     }
 
     // ── 内部モデル (NDJSON 行用) ──

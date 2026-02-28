@@ -81,38 +81,32 @@ internal sealed class RecordingBuffer : IDisposable
             int remaining = count;
             int srcOffset = offset;
 
+            if (_streaming && _streamingFile != null)
+            {
+                // ストリーミングモード: ディスクに直接書き出す (メモリ上限なし)
+                _streamingFile.Write(buffer, srcOffset, remaining);
+                _totalBytes += remaining;
+                return;
+            }
+
+            // メモリモード: チャンクに蓄積 (_maxBytes まで)
             while (remaining > 0 && _totalBytes < _maxBytes)
             {
+                if (_chunks.Count == 0 || _tailOffset >= ChunkSize)
+                {
+                    _chunks.Add(new byte[ChunkSize]);
+                    _tailOffset = 0;
+                }
+
+                int space = ChunkSize - _tailOffset;
                 int maxWrite = (int)Math.Min(remaining, _maxBytes - _totalBytes);
+                int toWrite = Math.Min(space, maxWrite);
 
-                if (_streaming && _streamingFile != null)
-                {
-                    // ストリーミングモード: ディスクに直接書き出す (メモリ上限を適用しない)
-                    int toWrite = remaining;
-                    _streamingFile.Write(buffer, srcOffset, toWrite);
-                    _totalBytes += toWrite;
-                    srcOffset += toWrite;
-                    remaining = 0;
-                    break;
-                }
-                else
-                {
-                    // メモリモード: チャンクに蓄積
-                    if (_chunks.Count == 0 || _tailOffset >= ChunkSize)
-                    {
-                        _chunks.Add(new byte[ChunkSize]);
-                        _tailOffset = 0;
-                    }
-
-                    int space = ChunkSize - _tailOffset;
-                    int toWrite = Math.Min(space, maxWrite);
-
-                    Buffer.BlockCopy(buffer, srcOffset, _chunks[^1], _tailOffset, toWrite);
-                    _tailOffset += toWrite;
-                    _totalBytes += toWrite;
-                    srcOffset += toWrite;
-                    remaining -= toWrite;
-                }
+                Buffer.BlockCopy(buffer, srcOffset, _chunks[^1], _tailOffset, toWrite);
+                _tailOffset += toWrite;
+                _totalBytes += toWrite;
+                srcOffset += toWrite;
+                remaining -= toWrite;
             }
         }
     }
