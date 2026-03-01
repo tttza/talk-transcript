@@ -306,6 +306,7 @@ while (!quit)
     try
     {
         callTranscriber.Start();
+        overallStart = DateTime.Now; // タイマーを実際の録音開始時点にリセット
         AppLogger.Info($"音声認識開始 (エンジン: {engineName}, GPU: {useGpu})");
     }
     catch (Exception ex)
@@ -319,6 +320,7 @@ while (!quit)
         try
         {
             callTranscriber.Start();
+            overallStart = DateTime.Now; // リトライ成功時もリセット
             AppLogger.Info("リトライ成功");
         }
         catch (Exception retryEx)
@@ -369,8 +371,7 @@ while (!quit)
                 engineName = (settings.EngineName ?? hwProfile.RecommendedEngine).ToLowerInvariant();
                 useGpu = settings.EngineName != null ? settings.UseGpu : hwProfile.RecommendedUseGpu;
             }
-            // セッション開始時刻をリセット (Whisper 後処理のタイムスタンプが正しくなるよう)
-            overallStart = DateTime.Now;
+            // セッション開始時刻は Start() 成功後に自動リセットされるため、ここでは不要
             // プロセス優先度を再適用
             ConfigMenu.ApplyProcessPriority(settings.ProcessPriority);
             // --lang 引数が指定されていればそちらを優先

@@ -175,13 +175,10 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         _engine.AudioStateChanged += OnAudioStateChanged;
 
         // ── キャプチャ開始 ──
-        // Bluetooth HFP デバイスでは、ループバックとマイクを同時に開始すると
-        // 干渉する場合がある。ループバックを先に開始して安定させてからマイクを開始する。
-        _speakerCapture.StartRecording();
-        Console.WriteLine("[通話] スピーカーループバックを開始 (安定待ち...)");
-        Thread.Sleep(1500);
+        // マイク先行。Bluetooth HFP 干渉防止のため 500ms 間隔後にスピーカー開始。
         _micCapture.StartRecording();
-        Console.WriteLine("[通話] マイクキャプチャを開始しました");
+        Thread.Sleep(500);
+        _speakerCapture.StartRecording();
     }
 
     // ────────────────────────────────────────────────

@@ -4,6 +4,11 @@ namespace TalkTranscript.Audio;
 /// 環境ノイズに基づいて無音閾値を動的に調整するアダプティブノイズゲート。
 /// 直近の RMS エネルギー履歴からノイズフロアを推定し、
 /// 閾値を自動的に引き上げ/引き下げする。
+///
+/// <b>呼び出しパターン</b>:
+/// <see cref="IsVoice"/> を先に判定し、非音声 (ノイズ) チャンクでのみ
+/// <see cref="Update"/> を呼ぶこと。音声 RMS を Update に渡すと
+/// ノイズフロアが過大評価され、閾値が跳ね上がる。
 /// </summary>
 internal sealed class AdaptiveNoiseGate
 {
@@ -43,9 +48,11 @@ internal sealed class AdaptiveNoiseGate
     }
 
     /// <summary>
-    /// 新しい RMS 値を供給し、ノイズフロアと閾値を更新する。
+    /// ノイズチャンクの RMS を供給し、ノイズフロアと閾値を更新する。
+    /// <see cref="IsVoice"/> が false を返したチャンクでのみ呼ぶこと。
+    /// 音声 RMS を渡すとノイズフロアが過大評価される。
     /// </summary>
-    /// <param name="rms">チャンクの RMS エネルギー</param>
+    /// <param name="rms">非音声チャンクの RMS エネルギー</param>
     public void Update(float rms)
     {
         _rmsHistory.Enqueue(rms);

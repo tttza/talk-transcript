@@ -108,9 +108,9 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     /// <summary>バッファ全体の RMS がこの値未満なら実質無音とみなしスキップ (Whisper ハルシネーション防止)</summary>
     private const float MinRmsEnergy = 200f;
     /// <summary>最小バッファ秒数 (短すぎるチャンクは精度が低い) — BackpressureMonitor で動的に調整される</summary>
-    private const double DefaultMinBufferSec = 2.0;
+    private const double DefaultMinBufferSec = 1.5;
     /// <summary>最大バッファ秒数 (長い発話でもここで強制処理) — BackpressureMonitor で動的に調整される</summary>
-    private const double DefaultMaxBufferSec = 12.0;
+    private const double DefaultMaxBufferSec = 5.0;
     /// <summary>短い発話を救済する長い無音判定時間 (ms)。バッファが最小長未満でもこの時間無音が続けば処理する</summary>
     private const int LongSilenceMs = 2000;
     /// <summary>エネルギーベースの VAD 閾値 (平均 RMS がこの値を超えたら音声あり)</summary>
@@ -221,9 +221,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         _spkProcessThread.Start();
 
         // キャプチャ開始
-        _speakerCapture.StartRecording();
-        Thread.Sleep(1500);
+        // マイクを先に開始し、ユーザーの音声を起動直後から捕捉する。
+        // Bluetooth HFP 等でループバックとマイクの同時開動が干渉する場合があるため、
+        // マイク安定後にスピーカーを開始する。この間マイクは既に録音中。
         _micCapture.StartRecording();
+        Thread.Sleep(500);
+        _speakerCapture.StartRecording();
     }
 
     // ────────────────────────────────────────────────
@@ -243,7 +246,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         OnVolumeUpdated?.Invoke(_lastMicPeak, _lastSpkPeak);
 
         // アダプティブノイズゲート (#8)
-        _micNoiseGate.Update(rms);
+        // IsVoice を先に判定し、非音声チャンクでのみ Update を呼ぶ。
+        // 音声 RMS でノイズフロア推定が汚染されると閾値が跳ね上がり、
+        // 以降の音声がゲートされてしまう。
+        bool micIsVoice = _micNoiseGate.IsVoice(peak, rms);
+        if (!micIsVoice)
+            _micNoiseGate.Update(rms);
 
         // エネルギー履歴を更新 (スライディングウィンドウ VAD)
         lock (_micBufLock)
@@ -257,7 +265,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         _micRecording.Write(e.Buffer, 0, e.BytesRecorded);
 
         // 無音スキップ: アダプティブノイズゲート判定
-        if (!_micNoiseGate.IsVoice(peak, rms)) return;
+        if (!micIsVoice) return;
 
         // VAD: 音声がある時刻を記録
         _micLastVoiceTime = DateTime.UtcNow;
@@ -305,7 +313,10 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         OnVolumeUpdated?.Invoke(_lastMicPeak, _lastSpkPeak);
 
         // アダプティブノイズゲート (#8)
-        _spkNoiseGate.Update(rms);
+        // IsVoice を先に判定し、非音声チャンクでのみ Update を呼ぶ。
+        bool spkIsVoice = _spkNoiseGate.IsVoice(peak, rms);
+        if (!spkIsVoice)
+            _spkNoiseGate.Update(rms);
 
         // エネルギー履歴を更新
         lock (_spkBufLock)
@@ -318,7 +329,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         // 録音全体を保存 (ノイズゲート前に記録)
         _speakerRecording.Write(converted, 0, converted.Length);
 
-        if (!_spkNoiseGate.IsVoice(peak, rms)) return;
+        if (!spkIsVoice) return;
 
         // VAD: 音声がある時刻を記録
         _spkLastVoiceTime = DateTime.UtcNow;
@@ -379,6 +390,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     {
       try
       {
+        bool firstChunk = true;
         while (!_stopping)
         {
             Thread.Sleep(200); // ポーリング間隔
@@ -386,6 +398,10 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             // バックプレッシャーで動的に調整されるバッファサイズ
             int minBytes = (int)(TargetFormat.SampleRate * 2 * backpressure.CurrentMinBufferSec);
             int maxBytes = (int)(TargetFormat.SampleRate * 2 * backpressure.CurrentMaxBufferSec);
+
+            // 初回チャンクは早めに処理して応答速度を優先 (5秒→3秒)
+            if (firstChunk)
+                maxBytes = Math.Min(maxBytes, (int)(TargetFormat.SampleRate * 2 * 3.0));
 
             byte[]? pcmData = null;
 
@@ -452,6 +468,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
             if (pcmData != null)
             {
+                firstChunk = false;
                 string prompt = getPrompt();
                 string lastText = getLastText();
 
