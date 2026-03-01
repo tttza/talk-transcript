@@ -148,10 +148,10 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         };
 
         // ── キャプチャ開始 ──
-        // マイク先行。Bluetooth HFP 干渉防止のため 500ms 間隔後にスピーカー開始。
-        _micCapture.StartRecording();
-        Thread.Sleep(500);
+        // Bluetooth HFP 干渉防止のためループバックを先に安定させてからマイクを開始。
         _speakerCapture.StartRecording();
+        Thread.Sleep(500);
+        _micCapture.StartRecording();
 
         // ── Producer-Consumer スレッドを起動 ──
         _micProcessThread = new Thread(MicVoskLoop) { IsBackground = true, Name = "VoskMicProcess" };

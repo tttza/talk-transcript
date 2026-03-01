@@ -108,9 +108,9 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     /// <summary>バッファ全体の RMS がこの値未満なら実質無音とみなしスキップ (Whisper ハルシネーション防止)</summary>
     private const float MinRmsEnergy = 200f;
     /// <summary>最小バッファ秒数 (短すぎるチャンクは精度が低い) — BackpressureMonitor で動的に調整される</summary>
-    private const double DefaultMinBufferSec = 1.5;
+    private const double DefaultMinBufferSec = 2.0;
     /// <summary>最大バッファ秒数 (長い発話でもここで強制処理) — BackpressureMonitor で動的に調整される</summary>
-    private const double DefaultMaxBufferSec = 5.0;
+    private const double DefaultMaxBufferSec = 12.0;
     /// <summary>短い発話を救済する長い無音判定時間 (ms)。バッファが最小長未満でもこの時間無音が続けば処理する</summary>
     private const int LongSilenceMs = 2000;
     /// <summary>エネルギーベースの VAD 閾値 (平均 RMS がこの値を超えたら音声あり)</summary>
@@ -221,12 +221,11 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         _spkProcessThread.Start();
 
         // キャプチャ開始
-        // マイクを先に開始し、ユーザーの音声を起動直後から捕捉する。
-        // Bluetooth HFP 等でループバックとマイクの同時開動が干渉する場合があるため、
-        // マイク安定後にスピーカーを開始する。この間マイクは既に録音中。
-        _micCapture.StartRecording();
-        Thread.Sleep(500);
+        // Bluetooth HFP デバイスでは、ループバックとマイクを同時に開始すると
+        // 干渉する場合がある。ループバックを先に開始して安定させてからマイクを開始する。
         _speakerCapture.StartRecording();
+        Thread.Sleep(500);
+        _micCapture.StartRecording();
     }
 
     // ────────────────────────────────────────────────
