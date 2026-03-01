@@ -20,9 +20,9 @@ internal static class DeviceHelper
     {
         string targetName = mmDevice.FriendlyName;
 
-        for (int i = 0; i < WaveIn.DeviceCount; i++)
+        for (int i = 0; i < WaveInEvent.DeviceCount; i++)
         {
-            var caps = WaveIn.GetCapabilities(i);
+            var caps = WaveInEvent.GetCapabilities(i);
             string prodName = caps.ProductName;
 
             if (targetName.StartsWith(prodName, StringComparison.OrdinalIgnoreCase) ||

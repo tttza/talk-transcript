@@ -635,9 +635,9 @@ void RunDiagnostics()
     // WaveIn デバイス検索
     int waveInDeviceNum = -1;
     Console.WriteLine("    WaveIn デバイス一覧:");
-    for (int i = 0; i < NAudio.Wave.WaveIn.DeviceCount; i++)
+    for (int i = 0; i < NAudio.Wave.WaveInEvent.DeviceCount; i++)
     {
-        var caps = NAudio.Wave.WaveIn.GetCapabilities(i);
+        var caps = NAudio.Wave.WaveInEvent.GetCapabilities(i);
         bool match = mic.FriendlyName.StartsWith(caps.ProductName, StringComparison.OrdinalIgnoreCase);
         string marker = match ? " ★" : "";
         Console.WriteLine($"      #{i}: {caps.ProductName}{marker}");

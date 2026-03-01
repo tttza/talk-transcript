@@ -7,6 +7,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <PlatformTarget>x64</PlatformTarget>
     <ApplicationIcon>app.ico</ApplicationIcon>
+
+    <!-- ── publish 時の成果物削減 ── -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <SatelliteResourceLanguages>ja;en</SatelliteResourceLanguages>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+
+    <!-- トリミングで無効化される機能を保持 -->
+    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,7 +31,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+    <PackageReference Include="NAudio.WinMM" Version="2.2.1" />
     <PackageReference Include="Spectre.Console" Version="0.54.0" />
     <PackageReference Include="System.Management" Version="10.0.3" />
     <PackageReference Include="System.Speech" Version="8.0.0" />
@@ -30,6 +42,23 @@
     <PackageReference Include="Whisper.net.Runtime.Cuda" Version="1.9.0" />
   </ItemGroup>
 
-
+  <!-- publish 時にターゲット RID 以外のネイティブライブラリを除外 -->
+  <Target Name="RemoveUnwantedRuntimes" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <!-- Linux ランタイムは常に除外 -->
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').Contains('linux-x64'))" />
+      <!-- ターゲット RID 以外の Windows ランタイムを除外 -->
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').Contains('win-arm64'))
+                   And '$(RuntimeIdentifier)' != 'win-arm64'" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').Contains('win-x64'))
+                   And '$(RuntimeIdentifier)' != 'win-x64'" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').Contains('win-x86'))
+                   And '$(RuntimeIdentifier)' != 'win-x86'" />
+    </ItemGroup>
+  </Target>
 
 </Project>
