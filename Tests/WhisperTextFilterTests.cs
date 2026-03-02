@@ -134,4 +134,63 @@ public class WhisperTextFilterTests
         // 日本語と英語の間のスペースも保持
         Assert.Equal("これは test です", WhisperTextFilter.NormalizeText("これは test です"));
     }
+
+    // ── TrimOverlappingPrefix ──
+
+    [Fact]
+    public void TrimOverlappingPrefix_NoOverlap_ReturnsSameText()
+    {
+        string result = WhisperTextFilter.TrimOverlappingPrefix(
+            "まったく違うテキスト",
+            "前回のテキストです");
+        Assert.Equal("まったく違うテキスト", result);
+    }
+
+    [Fact]
+    public void TrimOverlappingPrefix_OverlapDetected_TrimsPrefix()
+    {
+        // 前回末尾の「ホーム画面」と新テキスト先頭の「ホーム画面」が重複
+        string result = WhisperTextFilter.TrimOverlappingPrefix(
+            "ホーム画面に増やすなんて、アップルが許す気がしない。",
+            "エッジがこうやって独自にアイコンを、ホーム画面。");
+        Assert.Equal("に増やすなんて、アップルが許す気がしない。", result);
+    }
+
+    [Fact]
+    public void TrimOverlappingPrefix_FullOverlap_ReturnsEmpty()
+    {
+        // 新テキスト全体が前回末尾と重複
+        string result = WhisperTextFilter.TrimOverlappingPrefix(
+            "ホーム画面",
+            "独自にアイコンを、ホーム画面。");
+        Assert.Equal("", result);
+    }
+
+    [Fact]
+    public void TrimOverlappingPrefix_ShortOverlap_Ignored()
+    {
+        // 2文字の重複は minOverlapChars=3 以下なので無視される
+        string result = WhisperTextFilter.TrimOverlappingPrefix(
+            "です。新しいテキスト",
+            "前回のテキストです。");
+        // 「です」は2文字なのでトリムされない
+        Assert.Equal("です。新しいテキスト", result);
+    }
+
+    [Fact]
+    public void TrimOverlappingPrefix_EmptyPrevious_ReturnsSameText()
+    {
+        string result = WhisperTextFilter.TrimOverlappingPrefix("新しいテキスト", "");
+        Assert.Equal("新しいテキスト", result);
+    }
+
+    [Fact]
+    public void TrimOverlappingPrefix_LongerOverlap_TrimsCorrectly()
+    {
+        // より長い重複: 「調べるところは見えてきた」が重複プレフィックス
+        string result = WhisperTextFilter.TrimOverlappingPrefix(
+            "調べるところは見えてきたので、なんとかなりそうです。",
+            "その点は調べるところは見えてきた。");
+        Assert.Equal("ので、なんとかなりそうです。", result);
+    }
 }

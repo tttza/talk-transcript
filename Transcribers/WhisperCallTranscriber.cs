@@ -474,18 +474,19 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 // 処理時間を計測してバックプレッシャーに報告
                 double audioSec = pcmData.Length / (double)(TargetFormat.SampleRate * 2);
                 var sw = Stopwatch.StartNew();
-                string result = ProcessChunk(pcmData, speaker, prompt, lastText);
+                var (allText, lastSeg) = ProcessChunk(pcmData, speaker, prompt, lastText);
                 sw.Stop();
                 backpressure.ReportChunkProcessed(audioSec, sw.Elapsed.TotalSeconds);
 
-                if (!string.IsNullOrEmpty(result))
+                if (!string.IsNullOrEmpty(allText))
                 {
-                    // Prompt を適切な長さに管理
-                    string newPrompt = prompt + result;
+                    // Prompt を適切な長さに管理 (全テキストを使用)
+                    string newPrompt = prompt + allText;
                     if (newPrompt.Length > MaxPromptLength)
                         newPrompt = newPrompt[^MaxPromptLength..];
                     setPrompt(newPrompt);
-                    setLastText(result);
+                    // 重複検出には最終セグメントのみ保持 (次チャンクとの境界比較用)
+                    setLastText(lastSeg);
                 }
             }
         }
@@ -535,13 +536,13 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
       }
     }
 
-    /// <summary>PCM 16bit チャンクを Whisper で認識する。認識テキストを返す。</summary>
-    private string ProcessChunk(byte[] pcm16, string speaker, string prompt, string lastText)
+    /// <summary>PCM 16bit チャンクを Whisper で認識する。(全テキスト, 最終セグメントテキスト) を返す。</summary>
+    private (string AllText, string LastSegment) ProcessChunk(byte[] pcm16, string speaker, string prompt, string lastText)
     {
         // バッファ全体の RMS エネルギーを確認—実質無音ならスキップ
         float rms = AudioProcessing.CalcRms(pcm16, pcm16.Length);
         if (rms < MinRmsEnergy)
-            return "";
+            return ("", "");
 
         try
         {
@@ -608,6 +609,8 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             }
 
             var sb = new System.Text.StringBuilder();
+            string lastSegText = "";
+            bool isFirstSegment = true;
 
             foreach (var (start, end, text) in results)
             {
@@ -619,6 +622,25 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 // ── 重複テキスト検出 ──
                 if (WhisperTextFilter.IsDuplicate(normalized, lastText))
                     continue;
+
+                // ── チャンク境界のオーバーラップ重複除去 ──
+                // Whisper のチャンク間オーバーラップにより、前チャンク末尾の音声が
+                // 次チャンクの先頭に含まれ、同じテキストが二重に認識されることがある。
+                // 最初のセグメントで前回の末尾と重複するプレフィックスを除去する。
+                if (isFirstSegment)
+                {
+                    string trimmed = WhisperTextFilter.TrimOverlappingPrefix(normalized, lastText);
+                    if (trimmed.Length < normalized.Length)
+                    {
+                        if (string.IsNullOrWhiteSpace(trimmed))
+                        {
+                            isFirstSegment = false;
+                            continue;  // 全体が重複 → スキップ
+                        }
+                        normalized = trimmed;
+                    }
+                    isFirstSegment = false;
+                }
 
                 sb.Append(normalized);
 
@@ -635,14 +657,15 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
                 OnTranscribed?.Invoke(entry);
                 lastText = normalized;
+                lastSegText = normalized;
             }
 
-            return sb.ToString();
+            return (sb.ToString(), lastSegText);
         }
         catch (Exception ex)
         {
             Logging.AppLogger.Error($"[Whisper] {speaker} 認識エラー", ex);
-            return "";
+            return ("", "");
         }
     }
 

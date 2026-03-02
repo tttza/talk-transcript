@@ -242,76 +242,60 @@ internal sealed class SpectreUI
     private IRenderable BuildDisplay(string spinnerFrame)
     {
         var elapsed = DateTime.Now - _startTime;
-        var rows = new List<IRenderable>();
 
-        // ── ステータス + 音量 (1行にまとめる: 常に最上部) ──
+        // ══════════════════════════════════════════
+        //  ヘッダー (固定 3 行: バナー / ステータス+音量 / 区切り線)
+        // ══════════════════════════════════════════
+        // 1行目: エンジン + デバイス + ファイル名
+        var gpuTag = _engine.StartsWith("whisper")
+            ? (_useGpu ? "[green]GPU[/]" : "[dim]CPU[/]")
+            : "";
+        var bannerLine =
+            $"  [white bold]{Markup.Escape(_engine.ToUpperInvariant())}[/]" +
+            (gpuTag.Length > 0 ? $" ({gpuTag})" : "") +
+            $"  [dim]│[/]  [cyan]🎤 {Markup.Escape(TruncateDevice(_micName))}[/]" +
+            $"  [dim]│[/]  [yellow]🔊 {Markup.Escape(TruncateDevice(_speakerName))}[/]" +
+            $"  [dim]│[/]  [dim]→[/] {Markup.Escape(_fileName)}";
+
+        // 2行目: ステータス + 音量メーター
         var statusParts = new List<string> { "[green]●[/]" };
         statusParts.Add($"{elapsed:hh\\:mm\\:ss}");
         if (_isTest)
             statusParts.Add($"[magenta]テスト({_testSeconds}秒)[/]");
         statusParts.Add(BuildVolumeBar("🎤", _micVolume, "cyan"));
         statusParts.Add(BuildVolumeBar("🔊", _speakerVolume, "yellow"));
-        rows.Add(new Markup("  " + string.Join("  ", statusParts)));
 
-        rows.Add(new Rule().RuleStyle("dim"));
+        // バナーの表示テキスト (Markup タグを除いた実テキスト) の表示幅で折り返し行数を計算
+        var bannerPlain =
+            "  " + _engine.ToUpperInvariant() +
+            (_engine.StartsWith("whisper") ? (_useGpu ? " (GPU)" : " (CPU)") : "") +
+            "  │  🎤 " + TruncateDevice(_micName) +
+            "  │  🔊 " + TruncateDevice(_speakerName) +
+            "  │  → " + _fileName;
 
-        // ── 文字起こし結果 ──
-        int maxEntries = EstimateMaxEntries();
+        int consoleWidth;
+        try { consoleWidth = Console.WindowWidth; } catch { consoleWidth = 80; }
+        int bannerLines = Math.Max(1, (int)Math.Ceiling(
+            (double)EstimateDisplayWidth(bannerPlain) / Math.Max(1, consoleWidth)));
 
-        List<TranscriptEntry> visible;
-        Dictionary<string, double> proc;
-        int totalEntries, scrollOff, hiddenAbove, hiddenBelow;
-        lock (_lock)
+        var header = new Rows(
+            new Markup(bannerLine),
+            new Markup("  " + string.Join("  ", statusParts)),
+            new Rule().RuleStyle("dim"));
+
+        int headerSize = bannerLines + 2;  // バナー(N行) + 音量(1行) + 区切り線(1行)
+
+        // ══════════════════════════════════════════
+        //  フッター (固定 3 行: 空行 / 区切り線 / キーガイド)
+        // ══════════════════════════════════════════
+        int scrollOff;
+        lock (_lock) scrollOff = _scrollOffset;
+
+        var footerRows = new List<IRenderable>
         {
-            totalEntries = _entries.Count;
-            scrollOff = _scrollOffset;
-            // 表示範囲: 末尾から scrollOffset 分戻った位置を基準に maxEntries 件表示
-            int endIdx = totalEntries - scrollOff;            // 表示末尾 (exclusive)
-            int startIdx = Math.Max(0, endIdx - maxEntries);  // 表示先頭
-            endIdx = Math.Max(startIdx, endIdx);              // 安全ガード
-            visible = _entries.GetRange(startIdx, endIdx - startIdx);
-            hiddenAbove = startIdx;
-            hiddenBelow = totalEntries - endIdx;
-            proc = new Dictionary<string, double>(_processing);
-        }
-
-        if (visible.Count == 0 && proc.Count == 0)
-        {
-            rows.Add(new Markup("  [dim italic]音声を待っています...[/]"));
-        }
-
-        // ── スクロール位置インジケーター (上方向) ──
-        if (hiddenAbove > 0)
-        {
-            rows.Add(new Markup($"  [dim]  ↑ さらに {hiddenAbove} 件[/]"));
-        }
-
-        foreach (var entry in visible)
-        {
-            var icon = entry.Speaker == "自分" ? "▶" : "◀";
-            var color = entry.Speaker == "自分" ? "cyan" : "yellow";
-            rows.Add(new Markup(
-                $"  [dim]{entry.Timestamp:HH:mm:ss}[/]  " +
-                $"[{color}]{icon} {Markup.Escape(entry.Speaker)}:[/] " +
-                Markup.Escape(entry.Text)));
-        }
-
-        // ── スクロール位置インジケーター (下方向) ──
-        if (hiddenBelow > 0)
-        {
-            rows.Add(new Markup($"  [dim]  ↓ さらに {hiddenBelow} 件 (最新)[/]"));
-        }
-
-        // ── 処理中インジケーター (スピナー) ──
-        foreach (var (speaker, dur) in proc)
-        {
-            rows.Add(new Markup(
-                $"  [yellow]{spinnerFrame}[/] [dim][[{Markup.Escape(speaker)}]] {dur:F1}秒の音声を処理中...[/]"));
-        }
-
-        // ── フッター (キー操作ガイド: 常に表示) ──
-        rows.Add(new Text(""));
-        rows.Add(new Rule().RuleStyle("dim"));
+            new Text(""),
+            new Rule().RuleStyle("dim")
+        };
         if (!_isTest)
         {
             var guide = "  [white bold]Ctrl+Q[/] [dim]停止[/]  │  " +
@@ -320,10 +304,95 @@ internal sealed class SpectreUI
                 "[white bold]↑↓[/][dim]/[/][white bold]PgUp PgDn[/] [dim]スクロール[/]";
             if (scrollOff > 0)
                 guide += "  │  [white bold]End[/] [dim]最新へ[/]";
-            rows.Add(new Markup(guide));
+            footerRows.Add(new Markup(guide));
+        }
+        var footer = new Rows(footerRows);
+        int footerSize = footerRows.Count;   // 2 (テスト) or 3 (通常)
+
+        // ══════════════════════════════════════════
+        //  ボディ (残り全部 — Layout が自動クリップ)
+        // ══════════════════════════════════════════
+        int bodyHeight;
+        try { bodyHeight = Math.Max(3, Console.WindowHeight - headerSize - footerSize); }
+        catch { bodyHeight = 20; }
+
+        List<TranscriptEntry> visible;
+        Dictionary<string, double> proc;
+        int totalEntries, hiddenAbove, hiddenBelow;
+        lock (_lock)
+        {
+            totalEntries = _entries.Count;
+            proc = new Dictionary<string, double>(_processing);
+
+            int endIdx = Math.Max(0, totalEntries - scrollOff);
+
+            // ボディ内のオーバーヘッド行 (インジケーター・スピナー)
+            // 最悪ケースで 2 (↑↓) + proc.Count を差し引いてエントリに使える行数を計算
+            int bodyOverhead = 2 + proc.Count;
+            int linesForEntries = Math.Max(1, bodyHeight - bodyOverhead);
+
+            // 末尾から遡り、折り返しを考慮して表示可能な行数に収まるエントリだけ選択
+            int usedLines = 0;
+            int startIdx = endIdx;
+            for (int i = endIdx - 1; i >= 0; i--)
+            {
+                int lines = EstimateEntryLines(_entries[i], consoleWidth);
+                if (usedLines + lines > linesForEntries) break;
+                usedLines += lines;
+                startIdx = i;
+            }
+
+            visible = _entries.GetRange(startIdx, endIdx - startIdx);
+            hiddenAbove = startIdx;
+            hiddenBelow = totalEntries - endIdx;
         }
 
-        return new Rows(rows);
+        var bodyRows = new List<IRenderable>();
+
+        if (visible.Count == 0 && proc.Count == 0)
+        {
+            bodyRows.Add(new Markup("  [dim italic]音声を待っています...[/]"));
+        }
+
+        if (hiddenAbove > 0)
+            bodyRows.Add(new Markup($"  [dim]  ↑ さらに {hiddenAbove} 件[/]"));
+
+        foreach (var entry in visible)
+        {
+            var icon = entry.Speaker == "自分" ? "▶" : "◀";
+            var color = entry.Speaker == "自分" ? "cyan" : "yellow";
+            bodyRows.Add(new Markup(
+                $"  [dim]{entry.Timestamp:HH:mm:ss}[/]  " +
+                $"[{color}]{icon} {Markup.Escape(entry.Speaker)}:[/] " +
+                Markup.Escape(entry.Text)));
+        }
+
+        if (hiddenBelow > 0)
+            bodyRows.Add(new Markup($"  [dim]  ↓ さらに {hiddenBelow} 件 (最新)[/]"));
+
+        foreach (var (speaker, dur) in proc)
+        {
+            bodyRows.Add(new Markup(
+                $"  [yellow]{spinnerFrame}[/] [dim][[{Markup.Escape(speaker)}]] {dur:F1}秒の音声を処理中...[/]"));
+        }
+
+        var body = new Rows(bodyRows);
+
+        // ══════════════════════════════════════════
+        //  Layout: ヘッダー/フッターを固定サイズで確保し
+        //  ボディは残り全部。はみ出しは構造的にクリップ。
+        // ══════════════════════════════════════════
+        var layout = new Layout("Root")
+            .SplitRows(
+                new Layout("Header").Size(headerSize),
+                new Layout("Body"),
+                new Layout("Footer").Size(footerSize));
+
+        layout["Header"].Update(header);
+        layout["Body"].Update(body);
+        layout["Footer"].Update(footer);
+
+        return layout;
     }
 
     /// <summary>音量バーを Spectre.Console マークアップ文字列で生成する</summary>
@@ -347,14 +416,56 @@ internal sealed class SpectreUI
         return $"{icon} [{color}]{bar}[/] [dim]{dbStr}[/]";
     }
 
-    /// <summary>現在の端末サイズと状態から表示可能なエントリ数を見積もる</summary>
+    /// <summary>スクロール用: 大まかな最大表示件数 (キー入力でのオフセット上限計算に使用)</summary>
     private int EstimateMaxEntries()
     {
-        // 固定行: ステータス+音量(1) + 区切り線(1) + スクロールインジケーター(2)
-        //       + 処理中スピナー + 空行(1) + 区切り線(1) + キーガイド(1) = 7 + proc
+        // ヘッダー(2) + フッター(3) + ボディオーバーヘッド(2) = 7
         int overhead = 7 + _processing.Count;
         try { return Math.Max(3, Console.WindowHeight - overhead); }
         catch { return 20; }
+    }
+
+    /// <summary>エントリが端末上で何行を消費するかを見積もる (折り返し考慮)</summary>
+    private static int EstimateEntryLines(TranscriptEntry entry, int consoleWidth)
+    {
+        // 表示プレフィクス: "  HH:mm:ss  ▶ Speaker: " (Markup タグは幅 0)
+        int prefixWidth = 2 + 8 + 2 + 2 + EstimateDisplayWidth(entry.Speaker) + 2;
+        int totalWidth = prefixWidth + EstimateDisplayWidth(entry.Text);
+        return Math.Max(1, (int)Math.Ceiling((double)totalWidth / Math.Max(1, consoleWidth)));
+    }
+
+    /// <summary>
+    /// 文字列の端末上の表示幅を見積もる。
+    /// CJK (日本語・中国語・韓国語) や全角文字は 2 カラム、それ以外は 1 カラム。
+    /// </summary>
+    private static int EstimateDisplayWidth(string text)
+    {
+        int width = 0;
+        foreach (char c in text)
+        {
+            if (IsWideChar(c))
+                width += 2;
+            else
+                width += 1;
+        }
+        return width;
+    }
+
+    /// <summary>端末で 2 カラム幅を占めるワイド文字かどうかを判定する</summary>
+    private static bool IsWideChar(char c)
+    {
+        // CJK Unified Ideographs, Hiragana, Katakana, Hangul, Fullwidth Forms, etc.
+        return c >= 0x1100 && (
+            (c <= 0x115F) ||                           // Hangul Jamo
+            (c >= 0x2E80 && c <= 0x303E) ||            // CJK Radicals, Kangxi, CJK Symbols
+            (c >= 0x3041 && c <= 0x33BF) ||            // Hiragana, Katakana, Bopomofo, CJK Compat
+            (c >= 0x3400 && c <= 0x4DBF) ||            // CJK Unified Ext A
+            (c >= 0x4E00 && c <= 0xA4CF) ||            // CJK Unified, Yi
+            (c >= 0xAC00 && c <= 0xD7AF) ||            // Hangul Syllables
+            (c >= 0xF900 && c <= 0xFAFF) ||            // CJK Compat Ideographs
+            (c >= 0xFE30 && c <= 0xFE6F) ||            // CJK Compat Forms
+            (c >= 0xFF01 && c <= 0xFF60) ||            // Fullwidth Forms
+            (c >= 0xFFE0 && c <= 0xFFE6));             // Fullwidth Signs
     }
 
     // ══════════════════════════════════════════════════

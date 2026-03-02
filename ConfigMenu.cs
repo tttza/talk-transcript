@@ -225,7 +225,7 @@ internal static class ConfigMenu
     private static void ConfigureEngine(AppSettings settings, HardwareInfo.EnvironmentProfile hwProfile)
     {
         SpectreUI.PrintSectionHeader("エンジン変更");
-        var newEngine = EngineSelector.SelectEngine(settings.EngineName ?? "vosk", hwProfile);
+        var newEngine = EngineSelector.SelectEngine(settings.EngineName ?? hwProfile.RecommendedEngine, hwProfile);
         if (newEngine != null)
         {
             settings.EngineName = newEngine;

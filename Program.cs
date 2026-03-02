@@ -154,17 +154,26 @@ else
     outputDir = Path.Combine(AppContext.BaseDirectory, "Transcripts");
 }
 Directory.CreateDirectory(outputDir);
-var fileName = $"transcript_{DateTime.Now:yyyyMMdd_HHmmss}.txt";
-var filePath = Path.Combine(outputDir, fileName);
+var baseName = $"transcript_{DateTime.Now:yyyyMMdd_HHmmss}";
 
 // txt 出力が有効かどうか判定 (フォーマット未設定 or Text を含む場合に出力)
 bool hasFormatConfig = extraFormats.Count > 0;
 bool outputText = !hasFormatConfig || extraFormats.Contains(OutputFormat.Text);
-TranscriptWriter? writer = outputText ? new TranscriptWriter(filePath) : null;
+
+// 表示用ファイル名: テキスト出力が有効なら .txt、そうでなければ最初のフォーマットの拡張子
+string primaryExt = outputText
+    ? ".txt"
+    : TranscriptExporter.GetExtension(extraFormats[0]);
+var fileName = baseName + primaryExt;
+var filePath = Path.Combine(outputDir, fileName);
+
+// テキスト出力パス (常に .txt)
+string textPath = Path.Combine(outputDir, baseName + ".txt");
+TranscriptWriter? writer = outputText ? new TranscriptWriter(textPath) : null;
 
 // JSON 逐次書き出し (クラッシュ時にデータを失わない)
 bool outputJson = extraFormats.Contains(OutputFormat.Json);
-string jsonPath = Path.Combine(outputDir, Path.GetFileNameWithoutExtension(fileName) + ".json");
+string jsonPath = Path.Combine(outputDir, baseName + ".json");
 IncrementalJsonWriter? jsonWriter = outputJson ? new IncrementalJsonWriter(jsonPath) : null;
 
 var overallStart = DateTime.Now;
@@ -252,10 +261,10 @@ while (!quit)
     // ── ストリーミング録音 (後処理不要時はメモリに蓄積せずディスクに直接書き出す) ──
     if (settings.SaveRecording && !canPostProcess)
     {
-        string dir = Path.GetDirectoryName(filePath) ?? ".";
-        string baseName = Path.GetFileNameWithoutExtension(filePath);
-        string micPath = Path.Combine(dir, $"{baseName}_mic.wav");
-        string? spkPath = settings.SaveMicOnly ? null : Path.Combine(dir, $"{baseName}_speaker.wav");
+        string recDir = Path.GetDirectoryName(filePath) ?? ".";
+        string recBaseName = Path.GetFileNameWithoutExtension(filePath);
+        string micPath = Path.Combine(recDir, $"{recBaseName}_mic.wav");
+        string? spkPath = settings.SaveMicOnly ? null : Path.Combine(recDir, $"{recBaseName}_speaker.wav");
         callTranscriber.StartStreamingRecording(micPath, spkPath);
         AppLogger.Info($"録音ストリーミング開始: {micPath}");
     }
@@ -268,8 +277,22 @@ while (!quit)
     void OnTranscribed(TranscriptEntry entry)
     {
         ui.AddEntry(entry);
-        writer?.Append(entry);
-        jsonWriter?.Append(entry);
+        try
+        {
+            writer?.Append(entry);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("テキスト書き出しエラー (認識は継続)", ex);
+        }
+        try
+        {
+            jsonWriter?.Append(entry);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("JSON 書き出しエラー (認識は継続)", ex);
+        }
         allEntries.Add(entry);
         if (entry.IsBookmark) { /* ブックマークはカウントしない */ }
         else if (entry.Speaker == "自分") { sessionMic++; totalMicCount++; }
@@ -290,8 +313,10 @@ while (!quit)
             Text: "ブックマーク",
             IsBookmark: true);
         ui.AddEntry(bookmark);
-        writer?.Append(bookmark);
-        jsonWriter?.Append(bookmark);
+        try { writer?.Append(bookmark); }
+        catch (Exception ex) { AppLogger.Error("ブックマーク書き出しエラー", ex); }
+        try { jsonWriter?.Append(bookmark); }
+        catch (Exception ex) { AppLogger.Error("ブックマーク JSON 書き出しエラー", ex); }
         allEntries.Add(bookmark);
         AppLogger.Info("ブックマークを追加しました");
     };
@@ -354,7 +379,7 @@ while (!quit)
     {
         case "quit":
             // Whisper 後処理
-            RunPostProcessing(callTranscriber, whisperModelSize, writer, filePath, overallStart, language);
+            RunPostProcessing(callTranscriber, whisperModelSize, writer, textPath, overallStart, language);
             quit = true;
             break;
 
@@ -388,7 +413,7 @@ while (!quit)
             if (newOutputText && !outputText)
             {
                 // テキスト出力が新たに有効化された
-                writer = new TranscriptWriter(filePath);
+                writer = new TranscriptWriter(textPath);
             }
             else if (!newOutputText && outputText)
             {
@@ -443,7 +468,7 @@ if (jsonWriter != null)
     AnsiConsole.MarkupLine($"  [green]✓[/] JSON 出力: [white]{Markup.Escape(jsonPath)}[/]");
 }
 
-SpectreUI.PrintSummary(outputText ? filePath : null, totalMicCount, totalSpkCount, DateTime.Now - overallStart);
+SpectreUI.PrintSummary(outputText ? textPath : null, totalMicCount, totalSpkCount, DateTime.Now - overallStart);
 
 // ── 追加フォーマットでエクスポート (#1) ──
 // JSON は IncrementalJsonWriter で既に出力済みなので除外

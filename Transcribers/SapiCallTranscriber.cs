@@ -53,6 +53,12 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     /// <summary>アクティブソースが切り替わった最後のタイムスタンプ</summary>
     private long _lastSwitchTicks = Environment.TickCount64;
 
+    /// <summary>認識エンジンが音声を処理中かどうか (AudioState.Speech)</summary>
+    private volatile bool _engineInSpeech;
+
+    /// <summary>SpeechDetected 時点でのアクティブソース (認識結果の話者判定に使用)</summary>
+    private volatile bool _speechDetectedMicActive = true;
+
     private volatile bool _stopping;
 
     // ── 定数 ──
@@ -63,7 +69,7 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     private const float SilenceThreshold = 300f;
 
     /// <summary>ソース切り替えの最小間隔 (ミリ秒)。チャタリング防止。</summary>
-    private const long SwitchCooldownMs = 400;
+    private const long SwitchCooldownMs = 800;
 
     // ── 統計 ──
     private int _micChunks;
@@ -268,11 +274,17 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     /// <summary>
     /// 音量レベルに基づいてアクティブソースを切り替える。
     /// チャタリング防止のため、最小切り替え間隔を設ける。
+    /// 認識エンジンが音声を処理中 (AudioState.Speech) の場合は
+    /// ソース切り替えを抑制し、発話の途中で音声が途切れるのを防ぐ。
     /// </summary>
     private void UpdateActiveSource()
     {
         long now = Environment.TickCount64;
         if (now - _lastSwitchTicks < SwitchCooldownMs) return;
+
+        // 認識エンジンが音声処理中はソース切り替えを抑制
+        // (自分の発話が認識途中で途切れるのを防止)
+        if (_engineInSpeech) return;
 
         bool newMicActive;
 
@@ -307,17 +319,21 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     private void OnAudioStateChanged(object? sender, AudioStateChangedEventArgs e)
     {
         Console.WriteLine($"[通話] AudioState: {e.AudioState}");
+        _engineInSpeech = (e.AudioState == AudioState.Speech);
     }
 
     private void OnSpeechDetected(object? sender, SpeechDetectedEventArgs e)
     {
-        string src = _micActive ? "自分" : "相手";
+        // 音声検出時点のソースを記録し、認識完了まで保持する
+        _speechDetectedMicActive = _micActive;
+        string src = _speechDetectedMicActive ? "自分" : "相手";
         Console.WriteLine($"[通話] 音声検出 ({src}, position: {e.AudioPosition})");
     }
 
     private void OnSpeechRecognized(object? sender, SpeechRecognizedEventArgs e)
     {
-        string speaker = _micActive ? "自分" : "相手";
+        // SpeechDetected 時点で記録したソースを使う (認識中のソース切替による誤判定を防止)
+        string speaker = _speechDetectedMicActive ? "自分" : "相手";
         Console.WriteLine($"[通話] 認識 ({speaker}): \"{e.Result.Text}\" (信頼度: {e.Result.Confidence:F2})");
 
         if (e.Result.Confidence < 0.1f) return;

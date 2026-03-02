@@ -188,4 +188,66 @@ internal static class WhisperTextFilter
 
         return prev[m];
     }
+
+    /// <summary>
+    /// 前回テキストの末尾と新テキストの先頭が重複している場合、
+    /// 重複プレフィックスを除去したテキストを返す。
+    /// Whisper のチャンク間オーバーラップにより、同じ音声区間が
+    /// 隣接チャンクで二重に認識されることへの対策。
+    /// </summary>
+    /// <param name="newText">新しく認識されたテキスト</param>
+    /// <param name="previousText">前回認識された最終セグメントのテキスト</param>
+    /// <param name="minOverlapChars">重複と判定する最小文字数 (正規化後)</param>
+    /// <returns>重複プレフィックスを除去したテキスト (重複なしなら元テキストをそのまま返す)</returns>
+    public static string TrimOverlappingPrefix(string newText, string previousText, int minOverlapChars = 3)
+    {
+        if (string.IsNullOrEmpty(newText) || string.IsNullOrEmpty(previousText))
+            return newText;
+
+        string newNorm = NormalizeForComparison(newText);
+        string prevNorm = NormalizeForComparison(previousText);
+
+        if (newNorm.Length < minOverlapChars || prevNorm.Length < minOverlapChars)
+            return newText;
+
+        // previousText の末尾 N 文字が newText の先頭 N 文字と一致する最長 N を探す
+        // (最長一致を優先して検索)
+        int maxCheck = Math.Min(newNorm.Length, Math.Min(prevNorm.Length, 30));
+        int bestOverlap = 0;
+
+        for (int len = maxCheck; len >= minOverlapChars; len--)
+        {
+            if (prevNorm.EndsWith(newNorm[..len], StringComparison.Ordinal))
+            {
+                bestOverlap = len;
+                break;
+            }
+        }
+
+        if (bestOverlap == 0)
+            return newText;
+
+        // 元テキストから overlap 分の「有効文字」(句読点等を除く) をスキップし、
+        // 残りのテキストを返す
+        int charsToSkip = bestOverlap;
+        int i = 0;
+        while (i < newText.Length && charsToSkip > 0)
+        {
+            if (!IsComparisonIgnoredChar(newText[i]))
+                charsToSkip--;
+            i++;
+        }
+
+        string remaining = newText[i..].TrimStart('、', ',', '。', '.', '　', ' ');
+        return string.IsNullOrWhiteSpace(remaining) ? "" : remaining;
+    }
+
+    /// <summary>
+    /// <see cref="NormalizeForComparison"/> で除去される文字かどうかを判定する。
+    /// </summary>
+    private static bool IsComparisonIgnoredChar(char c)
+    {
+        return char.IsWhiteSpace(c) || c is '。' or '、' or '，' or '．'
+            or '！' or '？' or '!' or '?' or ',' or '.' or '-' or 'ー';
+    }
 }
