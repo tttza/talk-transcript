@@ -426,16 +426,32 @@ internal sealed class SpectreUI
         {
             var icon = entry.Speaker == "自分" ? "▶" : "◀";
             var color = entry.Speaker == "自分" ? "cyan" : "yellow";
+
+            // プレフィクスの表示幅: "  HH:mm:ss  ▶ Speaker: "
+            int prefixWidth = 2 + 8 + 2 + 2 + EstimateDisplayWidth(entry.Speaker) + 2;
+            int availWidth = Math.Max(10, consoleWidth - prefixWidth);
+            var textLines = WrapTextLines(entry.Text, availWidth);
+            string indent = new string(' ', prefixWidth);
+            string wrappedText = string.Join("\n" + indent,
+                textLines.Select(l => Markup.Escape(l)));
+
             bodyRows.Add(new Markup(
                 $"  [dim]{entry.Timestamp:HH:mm:ss}[/]  " +
                 $"[{color}]{icon} {Markup.Escape(entry.Speaker)}:[/] " +
-                Markup.Escape(entry.Text)));
+                wrappedText));
 
             // 翻訳テキストがある場合は直下に表示
             if (!string.IsNullOrEmpty(entry.TranslatedText))
             {
+                const int transPrefixWidth = 15; // "             ↳ "
+                int transAvailWidth = Math.Max(10, consoleWidth - transPrefixWidth);
+                var transLines = WrapTextLines(entry.TranslatedText, transAvailWidth);
+                string transIndent = new string(' ', transPrefixWidth);
+                string wrappedTrans = string.Join("\n" + transIndent,
+                    transLines.Select(l => Markup.Escape(l)));
+
                 bodyRows.Add(new Markup(
-                    $"             [green]↳ {Markup.Escape(entry.TranslatedText)}[/]"));
+                    $"             [green]↳ {wrappedTrans}[/]"));
             }
         }
 
@@ -502,18 +518,121 @@ internal sealed class SpectreUI
     {
         // 表示プレフィクス: "  HH:mm:ss  ▶ Speaker: " (Markup タグは幅 0)
         int prefixWidth = 2 + 8 + 2 + 2 + EstimateDisplayWidth(entry.Speaker) + 2;
-        int totalWidth = prefixWidth + EstimateDisplayWidth(entry.Text);
-        int lines = Math.Max(1, (int)Math.Ceiling((double)totalWidth / Math.Max(1, consoleWidth)));
+        int availWidth = Math.Max(10, consoleWidth - prefixWidth);
+        int lines = WrapTextLines(entry.Text, availWidth).Count;
 
         // 翻訳行がある場合は追加行を計算
         if (!string.IsNullOrEmpty(entry.TranslatedText))
         {
-            int transWidth = 13 + 2 + EstimateDisplayWidth(entry.TranslatedText); // "             ↳ "
-            lines += Math.Max(1, (int)Math.Ceiling((double)transWidth / Math.Max(1, consoleWidth)));
+            const int transPrefixWidth = 15; // "             ↳ "
+            int transAvailWidth = Math.Max(10, consoleWidth - transPrefixWidth);
+            lines += WrapTextLines(entry.TranslatedText, transAvailWidth).Count;
         }
 
         return lines;
     }
+
+    /// <summary>
+    /// テキストを指定幅でワードラップし、行のリストを返す。
+    /// 英語テキストはスペースで、CJK テキストは文字境界で折り返す。
+    /// 日本語の禁則処理 (句読点が行頭に来ない等) を考慮する。
+    /// </summary>
+    private static List<string> WrapTextLines(string text, int maxWidth)
+    {
+        if (maxWidth < 4) maxWidth = 4;
+        var lines = new List<string>();
+        if (string.IsNullOrEmpty(text)) { lines.Add(""); return lines; }
+
+        int pos = 0;
+        while (pos < text.Length)
+        {
+            int lineWidth = 0;
+            int lineEnd = pos;
+            int lastBreakPos = -1;
+
+            while (lineEnd < text.Length)
+            {
+                char c = text[lineEnd];
+                int cw = IsWideChar(c) ? 2 : 1;
+
+                if (lineWidth + cw > maxWidth)
+                    break;
+
+                // 折り返し候補位置を記録
+                if (c == ' ')
+                {
+                    lastBreakPos = lineEnd;
+                }
+                else if (IsWideChar(c) && lineEnd > pos)
+                {
+                    // 禁則処理: この文字が行頭禁止文字なら、ここで折り返さない
+                    // (折り返すとこの文字が次行の先頭に来てしまう)
+                    if (!IsLineStartProhibited(c))
+                    {
+                        // 直前の文字が行末禁止文字でなければ折り返し候補
+                        if (!IsLineEndProhibited(text[lineEnd - 1]))
+                            lastBreakPos = lineEnd;
+                    }
+                }
+
+                lineWidth += cw;
+                lineEnd++;
+            }
+
+            // 残りテキストが 1 行に収まる場合
+            if (lineEnd >= text.Length)
+            {
+                lines.Add(text[pos..]);
+                break;
+            }
+
+            // 折り返し位置を決定
+            if (lastBreakPos > pos)
+            {
+                if (text[lastBreakPos] == ' ')
+                {
+                    lines.Add(text[pos..lastBreakPos]);
+                    pos = lastBreakPos + 1; // スペースをスキップ
+                }
+                else
+                {
+                    // CJK 文字境界で折り返し
+                    lines.Add(text[pos..lastBreakPos]);
+                    pos = lastBreakPos;
+                }
+            }
+            else
+            {
+                // 折り返し候補なし — 強制折り返し
+                lines.Add(text[pos..lineEnd]);
+                pos = lineEnd;
+            }
+        }
+
+        if (lines.Count == 0) lines.Add("");
+        return lines;
+    }
+
+    /// <summary>行頭禁止文字 (この文字で次の行を開始してはならない)</summary>
+    private static bool IsLineStartProhibited(char c) => c switch
+    {
+        '。' or '、' or '，' or '．' or '・' or '：' or '；' or
+        '！' or '？' or '）' or '）' or '」' or '』' or '】' or
+        '〕' or '〉' or '》' or '｝' or '〗' or '〙' or '〛' or
+        'ー' or '～' or '…' or '‥' or 'ぁ' or 'ぃ' or 'ぅ' or
+        'ぇ' or 'ぉ' or 'っ' or 'ゃ' or 'ゅ' or 'ょ' or 'ゎ' or
+        'ァ' or 'ィ' or 'ゥ' or 'ェ' or 'ォ' or 'ッ' or 'ャ' or
+        'ュ' or 'ョ' or 'ヮ' or '々' or '〻' => true,
+        _ => false,
+    };
+
+    /// <summary>行末禁止文字 (この文字で行を終了してはならない)</summary>
+    private static bool IsLineEndProhibited(char c) => c switch
+    {
+        '（' or '（' or '「' or '『' or '【' or '〔' or '〈' or
+        '《' or '｛' or '〖' or '〘' or '〚' => true,
+        _ => false,
+    };
 
     /// <summary>
     /// 文字列の端末上の表示幅を見積もる。

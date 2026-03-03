@@ -87,11 +87,13 @@ public class AppSettings
     /// 自動ゲイン制御 (AGC) を有効にするか。
     /// 声が小さい場合に自動的に音量を増幅し、認識精度を向上させる。
     /// </summary>
-    public bool AudioBoostEnabled { get; set; } = false;
+    public bool AudioBoostEnabled { get; set; } = true;
 
     /// <summary>
-    /// 音声ブーストの最大ゲイン倍率 (1〜20)。
-    /// 値が大きいほど小さい声を強く増幅するが、ノイズも増幅される。
+    /// 音声ブーストのゲイン上限倍率 (1〜20)。
+    /// 常にこの倍率で増幅するわけではなく、声の大きさに応じて
+    /// 1倍〜上限の範囲で自動調整される。通常の声量なら 1倍付近のまま。
+    /// 値が大きいほど非常に小さい声にも対応できるが、ノイズも増幅されやすい。
     /// 推奨: 5〜10。
     /// </summary>
     public int AudioBoostMaxGain { get; set; } = 10;

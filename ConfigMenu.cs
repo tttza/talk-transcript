@@ -132,7 +132,7 @@ internal static class ConfigMenu
         string resourceVal = $"{threadVal} / {priorityVal}";
 
         string boostVal = settings.AudioBoostEnabled
-            ? $"有効 (最大{settings.AudioBoostMaxGain}倍)"
+            ? $"有効 (上限{settings.AudioBoostMaxGain}倍)"
             : "無効";
 
         return new MenuItem[]
@@ -864,11 +864,12 @@ internal static class ConfigMenu
     private static void ConfigureAudioBoost(AppSettings settings)
     {
         string curBoost = settings.AudioBoostEnabled
-            ? $"有効 (最大{settings.AudioBoostMaxGain}倍)"
+            ? $"有効 (上限{settings.AudioBoostMaxGain}倍)"
             : "無効";
         PrintSubHeader("音声ブースト (AGC)", curBoost);
 
         AnsiConsole.MarkupLine("  [dim]声が小さい場合に自動的に音量を増幅し、認識精度を向上させます。[/]");
+        AnsiConsole.MarkupLine("  [dim]通常の声量では増幅されず、小さい声のときだけ必要な分だけ適用されます。[/]");
         AnsiConsole.MarkupLine("  [dim]ノイズも増幅されるため、静かな環境での使用を推奨します。[/]");
         AnsiConsole.WriteLine();
 
@@ -887,7 +888,7 @@ internal static class ConfigMenu
 
             var gainChoice = AnsiConsole.Prompt(
                 new SelectionPrompt<string>()
-                    .Title("[cyan]  最大ゲイン倍率:[/]")
+                    .Title("[cyan]  ゲイン上限倍率 (実際の倍率は声量に応じて自動調整):[/]")
                     .HighlightStyle(Style.Parse("bold cyan"))
                     .AddChoices(gainChoices));
             settings.AudioBoostMaxGain = int.Parse(gainChoice.Split(' ')[0]);
@@ -895,7 +896,7 @@ internal static class ConfigMenu
 
         settings.Save();
         string detail = settings.AudioBoostEnabled
-            ? $"有効 (最大{settings.AudioBoostMaxGain}倍)"
+            ? $"有効 (上限{settings.AudioBoostMaxGain}倍)"
             : "無効";
         PrintSaved("音声ブースト", detail);
         if (settings.AudioBoostEnabled)
