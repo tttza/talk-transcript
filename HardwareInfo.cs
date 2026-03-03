@@ -14,6 +14,7 @@ internal static class HardwareInfo
     public record EnvironmentProfile
     {
         public bool HasNvidiaGpu { get; init; }
+        public bool HasAmdGpu { get; init; }
         public bool HasIntelGpu { get; init; }
         public long GpuVramMB { get; init; }
         public string GpuName { get; init; } = "";
@@ -24,6 +25,8 @@ internal static class HardwareInfo
         public string RecommendedEngine { get; init; } = "vosk";
         /// <summary>GPU を使うべきか</summary>
         public bool RecommendedUseGpu { get; init; }
+        /// <summary>推奨 GPU バックエンド (NVIDIA → CUDA、AMD/Intel → Vulkan)</summary>
+        public GpuBackend RecommendedGpuBackend { get; init; } = GpuBackend.None;
     }
 
     /// <summary>環境を検出し推奨モデルを判定する</summary>
@@ -34,69 +37,102 @@ internal static class HardwareInfo
         long ramMB = GetSystemRamMB();
 
         var nvidia = gpus.FirstOrDefault(g => g.Vendor == "NVIDIA");
+        var amd = gpus.FirstOrDefault(g => g.Vendor == "AMD");
         var intel = gpus.FirstOrDefault(g => g.Vendor == "Intel");
 
         bool hasNvidia = nvidia != null;
+        bool hasAmd = amd != null;
         bool hasIntel = intel != null;
-        long vram = nvidia?.VramMB ?? intel?.VramMB ?? 0;
-        string gpuName = nvidia?.Name ?? intel?.Name ?? "";
+        long vram = nvidia?.VramMB ?? amd?.VramMB ?? intel?.VramMB ?? 0;
+        string gpuName = nvidia?.Name ?? amd?.Name ?? intel?.Name ?? "";
 
         // 推奨エンジン判定
         string engine;
         bool useGpu;
+        GpuBackend gpuBackend;
 
         if (hasNvidia && vram >= 8000)
         {
             // 8GB+ VRAM (RTX 3060以上): large が動く
             engine = vram >= 12000 ? "whisper-large" : "whisper-medium";
             useGpu = true;
+            gpuBackend = GpuBackend.Cuda;
         }
         else if (hasNvidia && vram >= 4000)
         {
             // 4-8GB VRAM: small まで
             engine = "whisper-small";
             useGpu = true;
+            gpuBackend = GpuBackend.Cuda;
         }
         else if (hasNvidia && vram >= 2000)
         {
             // 2-4GB VRAM: base まで
             engine = "whisper-base";
             useGpu = true;
+            gpuBackend = GpuBackend.Cuda;
         }
         else if (hasNvidia)
         {
             engine = "whisper-tiny";
             useGpu = true;
+            gpuBackend = GpuBackend.Cuda;
+        }
+        else if (hasAmd && vram >= 8000)
+        {
+            // AMD GPU 8GB+: Vulkan で medium/large
+            engine = vram >= 12000 ? "whisper-large" : "whisper-medium";
+            useGpu = true;
+            gpuBackend = GpuBackend.Vulkan;
+        }
+        else if (hasAmd && vram >= 4000)
+        {
+            // AMD GPU 4-8GB: Vulkan で small
+            engine = "whisper-small";
+            useGpu = true;
+            gpuBackend = GpuBackend.Vulkan;
+        }
+        else if (hasAmd && vram >= 2000)
+        {
+            // AMD GPU 2-4GB: Vulkan で base
+            engine = "whisper-base";
+            useGpu = true;
+            gpuBackend = GpuBackend.Vulkan;
         }
         else if (cpuCores >= 8 && ramMB >= 8000)
         {
             // 高性能 CPU (Ryzen 等): CPU で small まで実用的
             engine = "whisper-small";
             useGpu = false;
+            gpuBackend = GpuBackend.None;
         }
         else if (cpuCores >= 4 && ramMB >= 4000)
         {
             // 標準的 CPU: base が実用的
             engine = "whisper-base";
             useGpu = false;
+            gpuBackend = GpuBackend.None;
         }
         else
         {
             // 低スペック: vosk が最適
             engine = "vosk";
             useGpu = false;
+            gpuBackend = GpuBackend.None;
         }
 
         return new EnvironmentProfile
         {
             HasNvidiaGpu = hasNvidia,
+            HasAmdGpu = hasAmd,
             HasIntelGpu = hasIntel,
             GpuVramMB = vram,
             GpuName = gpuName,
             CpuCores = cpuCores,
             SystemRamMB = ramMB,
             RecommendedEngine = engine,
-            RecommendedUseGpu = useGpu
+            RecommendedUseGpu = useGpu,
+            RecommendedGpuBackend = gpuBackend
         };
     }
 
@@ -118,11 +154,12 @@ internal static class HardwareInfo
 
     private static string GetWhisperRating(EnvironmentProfile env, long requiredVramMB, int requiredCores, long requiredRamMB)
     {
-        if (env.HasNvidiaGpu && env.GpuVramMB >= requiredVramMB)
+        bool hasGpu = env.HasNvidiaGpu || env.HasAmdGpu;
+        if (hasGpu && env.GpuVramMB >= requiredVramMB)
             return "★";  // GPU で快適
-        if (!env.HasNvidiaGpu && env.CpuCores >= requiredCores && env.SystemRamMB >= requiredRamMB)
+        if (!hasGpu && env.CpuCores >= requiredCores && env.SystemRamMB >= requiredRamMB)
             return "★";  // CPU でも実用可
-        if (env.HasNvidiaGpu && env.GpuVramMB >= requiredVramMB * 0.7)
+        if (hasGpu && env.GpuVramMB >= requiredVramMB * 0.7)
             return "△";  // ギリギリ
         if (env.CpuCores >= requiredCores * 0.6 && env.SystemRamMB >= requiredRamMB * 0.7)
             return "△";  // CPU でやや重い

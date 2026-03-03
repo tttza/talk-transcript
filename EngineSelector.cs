@@ -28,8 +28,12 @@ internal static class EngineSelector
     public static string? SelectEngine(string currentEngine, HardwareInfo.EnvironmentProfile hwProfile)
     {
         // 環境情報表示
-        if (hwProfile.HasNvidiaGpu)
-            AnsiConsole.MarkupLine($"  [dim]環境:[/] [white]{Markup.Escape(hwProfile.GpuName ?? "GPU")} ({hwProfile.GpuVramMB / 1024}GB)[/]");
+        bool hasGpu = hwProfile.HasNvidiaGpu || hwProfile.HasAmdGpu;
+        if (hasGpu)
+        {
+            string backendLabel = hwProfile.HasNvidiaGpu ? "CUDA" : "Vulkan";
+            AnsiConsole.MarkupLine($"  [dim]環境:[/] [white]{Markup.Escape(hwProfile.GpuName ?? "GPU")} ({hwProfile.GpuVramMB / 1024}GB, {backendLabel})[/]");
+        }
         else
             AnsiConsole.MarkupLine($"  [dim]環境:[/] [white]CPU {hwProfile.CpuCores}コア / RAM {hwProfile.SystemRamMB / 1024}GB[/]");
         AnsiConsole.WriteLine();

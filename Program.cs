@@ -33,16 +33,37 @@ ConfigMenu.ApplyProcessPriority(settings.ProcessPriority);
 // エンジン選択: --engine 引数 > 設定ファイル > 環境推奨
 string engineName;
 bool useGpu;
+GpuBackend gpuBackend;
 int engineIdx = Array.IndexOf(args, "--engine");
 if (engineIdx >= 0 && engineIdx + 1 < args.Length)
 {
     engineName = args[engineIdx + 1].ToLowerInvariant();
-    useGpu = !args.Contains("--cpu");
+    if (args.Contains("--cpu"))
+    {
+        useGpu = false;
+        gpuBackend = GpuBackend.None;
+    }
+    else if (args.Contains("--vulkan"))
+    {
+        useGpu = true;
+        gpuBackend = GpuBackend.Vulkan;
+    }
+    else if (args.Contains("--cuda"))
+    {
+        useGpu = true;
+        gpuBackend = GpuBackend.Cuda;
+    }
+    else
+    {
+        useGpu = true;
+        gpuBackend = GpuBackend.Auto;
+    }
 }
 else
 {
     engineName = (settings.EngineName ?? hwProfile.RecommendedEngine).ToLowerInvariant();
-    useGpu = settings.EngineName != null ? settings.UseGpu : hwProfile.RecommendedUseGpu;
+    gpuBackend = settings.EngineName != null ? settings.EffectiveGpuBackend : hwProfile.RecommendedGpuBackend;
+    useGpu = gpuBackend != GpuBackend.None;
 }
 
 // Whisper モデルサイズの解析
@@ -50,19 +71,75 @@ string? whisperModelSize = null;
 if (engineName.StartsWith("whisper-"))
     whisperModelSize = engineName.Substring("whisper-".Length); // "tiny", "base" etc.
 
-// ── CUDA 利用可否チェック & ランタイムセットアップ ──
-bool cudaAvailable = CudaHelper.IsCudaAvailable();
-if (useGpu && cudaAvailable)
+// ── GPU バックエンド解決 & ランタイムセットアップ ──
+GpuBackend resolvedBackend = GpuBackend.None;
+
+if (useGpu || gpuBackend == GpuBackend.Auto)
 {
-    CudaHelper.SetupRuntime();
+    resolvedBackend = ResolveGpuBackend(gpuBackend, hwProfile);
+
+    if (resolvedBackend == GpuBackend.Cuda)
+    {
+        CudaHelper.SetupRuntime();
+        useGpu = true;
+        AnsiConsole.MarkupLine($"  [green]✓ {CudaHelper.GetCudaVersionLabel()} ランタイム検出[/]");
+    }
+    else if (resolvedBackend == GpuBackend.Vulkan)
+    {
+        VulkanHelper.SetupRuntime();
+        useGpu = true;
+        AnsiConsole.MarkupLine("  [green]✓ Vulkan ランタイム検出[/]");
+    }
+    else
+    {
+        useGpu = false;
+        if (gpuBackend != GpuBackend.None)
+        {
+            AnsiConsole.MarkupLine("  [yellow]⚠ GPU ランタイムが見つかりません。CPU モードで動作します。[/]");
+            if (hwProfile.HasNvidiaGpu)
+            {
+                AnsiConsole.MarkupLine("    CUDA を有効化するには CUDA Toolkit 12 以降をインストールしてください:");
+                AnsiConsole.MarkupLine("    [link]https://developer.nvidia.com/cuda-downloads[/]");
+            }
+            else
+            {
+                AnsiConsole.MarkupLine("    Vulkan 対応 GPU ドライバがインストールされていることを確認してください。");
+            }
+            AnsiConsole.WriteLine();
+        }
+    }
 }
-else if (useGpu && !cudaAvailable)
+
+/// <summary>
+/// GPU バックエンドを実際の利用可能状況に基づいて解決する。
+/// Auto モードの場合: NVIDIA → CUDA、AMD/Intel → Vulkan、なし → CPU。
+/// 指定バックエンドが利用不可の場合は代替にフォールバック。
+/// </summary>
+static GpuBackend ResolveGpuBackend(GpuBackend requested, HardwareInfo.EnvironmentProfile hw)
 {
-    useGpu = false;
-    AnsiConsole.MarkupLine("  [yellow]⚠ CUDA Toolkit (cublas64_13.dll) が見つかりません。CPU モードで動作します。[/]");
-    AnsiConsole.MarkupLine("    GPU を有効化するには CUDA Toolkit 13 をインストールしてください:");
-    AnsiConsole.MarkupLine("    [link]https://developer.nvidia.com/cuda-downloads[/]");
-    AnsiConsole.WriteLine();
+    switch (requested)
+    {
+        case GpuBackend.Cuda:
+            if (CudaHelper.IsCudaAvailable()) return GpuBackend.Cuda;
+            // CUDA が使えない場合、Vulkan にフォールバック
+            if (VulkanHelper.IsVulkanAvailable()) return GpuBackend.Vulkan;
+            return GpuBackend.None;
+
+        case GpuBackend.Vulkan:
+            if (VulkanHelper.IsVulkanAvailable()) return GpuBackend.Vulkan;
+            return GpuBackend.None;
+
+        case GpuBackend.Auto:
+            // NVIDIA GPU → CUDA 優先
+            if (hw.HasNvidiaGpu && CudaHelper.IsCudaAvailable()) return GpuBackend.Cuda;
+            // Vulkan は AMD / Intel / NVIDIA (CUDA なし) で使える
+            if ((hw.HasNvidiaGpu || hw.HasAmdGpu || hw.HasIntelGpu) && VulkanHelper.IsVulkanAvailable())
+                return GpuBackend.Vulkan;
+            return GpuBackend.None;
+
+        default:
+            return GpuBackend.None;
+    }
 }
 
 // ── 診断モード ──
@@ -306,7 +383,7 @@ while (!quit)
     // ── バナー表示 ──
     SpectreUI.PrintBanner(engineName, useGpu, micDevice.FriendlyName,
                           speakerDevice.FriendlyName, Path.GetFileName(filePath),
-                          testMode, testSeconds);
+                          testMode, testSeconds, resolvedBackend);
 
     // ── Whisper モデルサイズ解析 ──
     whisperModelSize = engineName.StartsWith("whisper-")
@@ -369,7 +446,7 @@ while (!quit)
     // ── SpectreUI セットアップ ──
     var ui = new SpectreUI();
     ui.Configure(engineName, useGpu, micDevice.FriendlyName, speakerDevice.FriendlyName,
-                 Path.GetFileName(filePath), testMode, testSeconds);
+                 Path.GetFileName(filePath), testMode, testSeconds, resolvedBackend);
 
     void OnTranscribed(TranscriptEntry entry)
     {
@@ -519,7 +596,9 @@ while (!quit)
             if (engineIdx < 0)
             {
                 engineName = (settings.EngineName ?? hwProfile.RecommendedEngine).ToLowerInvariant();
-                useGpu = settings.EngineName != null ? settings.UseGpu : hwProfile.RecommendedUseGpu;
+                gpuBackend = settings.EngineName != null ? settings.EffectiveGpuBackend : hwProfile.RecommendedGpuBackend;
+                resolvedBackend = ResolveGpuBackend(gpuBackend, hwProfile);
+                useGpu = resolvedBackend != GpuBackend.None;
             }
             // セッション開始時刻は Start() 成功後に自動リセットされるため、ここでは不要
             // プロセス優先度を再適用

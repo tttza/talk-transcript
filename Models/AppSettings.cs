@@ -27,6 +27,13 @@ public class AppSettings
     /// <summary>Whisper で GPU を使用するか (CUDA ランタイム導入時のみ有効)</summary>
     public bool UseGpu { get; set; } = true;
 
+    /// <summary>
+    /// GPU バックエンド ("Auto" / "Cuda" / "Vulkan" / "None")。
+    /// Auto = NVIDIA GPU → CUDA、AMD/Intel GPU → Vulkan、GPU なし → CPU。
+    /// 未設定 (null) の場合は UseGpu 設定から自動判定する (後方互換)。
+    /// </summary>
+    public string? GpuBackendName { get; set; }
+
     /// <summary>認識言語 (ja / en / auto など。Whisper の言語パラメータ)</summary>
     public string? Language { get; set; }
 
@@ -73,6 +80,30 @@ public class AppSettings
 
     /// <summary>翻訳で GPU を使用するか</summary>
     public bool TranslationUseGpu { get; set; } = true;
+
+    // ── GPU バックエンド ヘルパー ──
+
+    /// <summary>
+    /// GpuBackend 列挙値を取得する。
+    /// GpuBackendName が未設定の場合は UseGpu フラグから自動変換する (後方互換)。
+    /// </summary>
+    [JsonIgnore]
+    public GpuBackend EffectiveGpuBackend
+    {
+        get
+        {
+            if (!string.IsNullOrEmpty(GpuBackendName)
+                && Enum.TryParse<GpuBackend>(GpuBackendName, true, out var parsed))
+                return parsed;
+            // 後方互換: UseGpu が true なら Auto (自動検出)、false なら None
+            return UseGpu ? GpuBackend.Auto : GpuBackend.None;
+        }
+        set
+        {
+            GpuBackendName = value.ToString();
+            UseGpu = value != GpuBackend.None;
+        }
+    }
 
     // ── 永続化 ──
 

@@ -22,6 +22,7 @@ internal sealed class SpectreUI
 
     private string _engine = "";
     private bool _useGpu;
+    private GpuBackend _gpuBackend;
     private string _micName = "";
     private string _speakerName = "";
     private string _fileName = "";
@@ -43,10 +44,12 @@ internal sealed class SpectreUI
     public event Action? OnBookmarkRequested;
 
     public void Configure(string engine, bool useGpu, string mic, string speaker,
-                          string fileName, bool test, int testSec)
+                          string fileName, bool test, int testSec,
+                          GpuBackend gpuBackend = GpuBackend.None)
     {
         _engine = engine;
         _useGpu = useGpu;
+        _gpuBackend = gpuBackend;
         _micName = mic;
         _speakerName = speaker;
         _fileName = fileName;
@@ -296,7 +299,7 @@ internal sealed class SpectreUI
         // ══════════════════════════════════════════
         // 1行目: エンジン + デバイス + ファイル名
         var gpuTag = _engine.StartsWith("whisper")
-            ? (_useGpu ? "[green]GPU[/]" : "[dim]CPU[/]")
+            ? (_useGpu ? $"[green]{FormatGpuBackendTag(_gpuBackend)}[/]" : "[dim]CPU[/]")
             : "";
         var bannerLine =
             $"  [white bold]{Markup.Escape(_engine.ToUpperInvariant())}[/]" +
@@ -316,7 +319,7 @@ internal sealed class SpectreUI
         // バナーの表示テキスト (Markup タグを除いた実テキスト) の表示幅で折り返し行数を計算
         var bannerPlain =
             "  " + _engine.ToUpperInvariant() +
-            (_engine.StartsWith("whisper") ? (_useGpu ? " (GPU)" : " (CPU)") : "") +
+            (_engine.StartsWith("whisper") ? (_useGpu ? $" ({FormatGpuBackendTag(_gpuBackend)})" : " (CPU)") : "") +
             "  │  🎤 " + TruncateDevice(_micName) +
             "  │  🔊 " + TruncateDevice(_speakerName) +
             "  │  → " + _fileName;
@@ -539,7 +542,8 @@ internal sealed class SpectreUI
     /// <summary>バナーを表示する</summary>
     public static void PrintBanner(string engine, bool useGpu, string mic,
                                    string speaker, string fileName,
-                                   bool test, int sec)
+                                   bool test, int sec,
+                                   GpuBackend gpuBackend = GpuBackend.None)
     {
         AnsiConsole.WriteLine();
 
@@ -547,7 +551,7 @@ internal sealed class SpectreUI
             AnsiConsole.MarkupLine($"  [magenta][[テストモード]] {sec}秒後に自動停止[/]");
 
         var gpuTag = engine.StartsWith("whisper")
-            ? (useGpu ? "[green]GPU[/]" : "[dim]CPU[/]")
+            ? (useGpu ? $"[green]{FormatGpuBackendTag(gpuBackend)}[/]" : "[dim]CPU[/]")
             : "";
 
         // 1行目: エンジン + デバイス
@@ -558,6 +562,16 @@ internal sealed class SpectreUI
             $"  [dim]│[/]  [yellow]🔊 {Markup.Escape(TruncateDevice(speaker))}[/]" +
             $"  [dim]│[/]  [dim]→[/] {Markup.Escape(fileName)}");
     }
+
+    /// <summary>GPU バックエンドの表示タグを生成する</summary>
+    private static string FormatGpuBackendTag(GpuBackend backend) => backend switch
+    {
+        GpuBackend.Cuda => CudaHelper.DetectedCudaMajor > 0
+            ? $"GPU/{CudaHelper.GetCudaVersionLabel()}"
+            : "GPU/CUDA",
+        GpuBackend.Vulkan => "GPU/Vulkan",
+        _ => "GPU"
+    };
 
     /// <summary>デバイス名が長い場合に短縮する</summary>
     private static string TruncateDevice(string name)

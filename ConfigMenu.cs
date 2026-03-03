@@ -30,7 +30,7 @@ internal static class ConfigMenu
         var menuItems = new (string Label, Action? Action)[]
         {
             ("エンジン",         () => ConfigureEngine(settings, hwProfile)),
-            ("GPU (CUDA)",      () => ConfigureGpu(settings)),
+            ("GPU (CUDA/Vulkan)", () => ConfigureGpu(settings, hwProfile)),
             ("言語",             () => ConfigureLanguage(settings)),
             ("翻訳",             () => ConfigureTranslation(settings)),
             ("出力ディレクトリ",   () => ConfigureOutputDirectory(settings)),
@@ -197,7 +197,7 @@ internal static class ConfigMenu
             .AddColumn("[white]値[/]");
 
         table.AddRow("エンジン", Markup.Escape(settings.EngineName ?? "(自動)"));
-        table.AddRow("GPU", settings.UseGpu ? "[green]有効[/]" : "[yellow]無効[/]");
+        table.AddRow("GPU", FormatGpuDisplay(settings));
         table.AddRow("言語", Markup.Escape(FormatLanguageDisplay(settings.Language)));
         table.AddRow("出力ディレクトリ", Markup.Escape(settings.OutputDirectory ?? "(デフォルト)"));
 
@@ -249,21 +249,81 @@ internal static class ConfigMenu
         AnsiConsole.WriteLine();
     }
 
-    private static void ConfigureGpu(AppSettings settings)
+    private static void ConfigureGpu(AppSettings settings, HardwareInfo.EnvironmentProfile hwProfile)
     {
+        SpectreUI.PrintSectionHeader("GPU バックエンド");
+
         bool cudaAvailable = CudaHelper.IsCudaAvailable();
-        if (!cudaAvailable)
+        bool vulkanAvailable = VulkanHelper.IsVulkanAvailable();
+
+        // 利用可能なバックエンドを表示
+        var statusParts = new List<string>();
+        if (cudaAvailable)
+            statusParts.Add($"[green]CUDA ({CudaHelper.GetCudaVersionLabel()}) ✓[/]");
+        else
+            statusParts.Add("[dim]CUDA ✗[/]");
+        if (vulkanAvailable)
+            statusParts.Add("[green]Vulkan ✓[/]");
+        else
+            statusParts.Add("[dim]Vulkan ✗[/]");
+        AnsiConsole.MarkupLine($"  利用可能: {string.Join("  ", statusParts)}");
+        AnsiConsole.WriteLine();
+
+        // GPU 情報表示
+        if (hwProfile.HasNvidiaGpu)
+            AnsiConsole.MarkupLine($"  [dim]GPU:[/] [white]{Markup.Escape(hwProfile.GpuName)} ({hwProfile.GpuVramMB / 1024}GB) - NVIDIA[/]");
+        else if (hwProfile.HasAmdGpu)
+            AnsiConsole.MarkupLine($"  [dim]GPU:[/] [white]{Markup.Escape(hwProfile.GpuName)} ({hwProfile.GpuVramMB / 1024}GB) - AMD[/]");
+        else if (hwProfile.HasIntelGpu)
+            AnsiConsole.MarkupLine($"  [dim]GPU:[/] [white]{Markup.Escape(hwProfile.GpuName)} - Intel[/]");
+        AnsiConsole.WriteLine();
+
+        // 選択肢を構築
+        var choices = new List<string> { "Auto (自動検出)" };
+        if (cudaAvailable)
+            choices.Add($"CUDA ({CudaHelper.GetCudaVersionLabel()})");
+        if (vulkanAvailable)
+            choices.Add("Vulkan");
+        choices.Add("CPU (無効)");
+
+        var selected = AnsiConsole.Prompt(
+            new SelectionPrompt<string>()
+                .Title("[cyan]  GPU バックエンドを選択:[/]")
+                .AddChoices(choices));
+
+        if (selected.StartsWith("Auto"))
         {
-            AnsiConsole.MarkupLine("  [yellow]⚠ CUDA Toolkit が検出されません。GPU モードは使用できません。[/]");
-            settings.UseGpu = false;
+            settings.EffectiveGpuBackend = GpuBackend.Auto;
+        }
+        else if (selected.StartsWith("CUDA"))
+        {
+            settings.EffectiveGpuBackend = GpuBackend.Cuda;
+        }
+        else if (selected.StartsWith("Vulkan"))
+        {
+            settings.EffectiveGpuBackend = GpuBackend.Vulkan;
         }
         else
         {
-            settings.UseGpu = AnsiConsole.Confirm("  GPU (CUDA) を使用しますか?", settings.UseGpu);
+            settings.EffectiveGpuBackend = GpuBackend.None;
         }
+
         settings.Save();
-        AnsiConsole.MarkupLine($"  [green]→ {(settings.UseGpu ? "GPU" : "CPU")} モード[/]");
+        AnsiConsole.MarkupLine($"  [green]→ {FormatGpuDisplay(settings)}[/]");
         AnsiConsole.WriteLine();
+    }
+
+    /// <summary>GPU 設定の表示用文字列を生成する</summary>
+    private static string FormatGpuDisplay(AppSettings settings)
+    {
+        return settings.EffectiveGpuBackend switch
+        {
+            GpuBackend.Auto => "[green]Auto (自動)[/]",
+            GpuBackend.Cuda => $"[green]CUDA[/]",
+            GpuBackend.Vulkan => "[green]Vulkan[/]",
+            GpuBackend.None => "[yellow]無効 (CPU)[/]",
+            _ => "[dim]不明[/]"
+        };
     }
 
     /// <summary>言語コードと表示名の対応表</summary>
