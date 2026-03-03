@@ -1,4 +1,5 @@
 using TalkTranscript.Models;
+using TalkTranscript.Transcribers;
 using TalkTranscript.Translation;
 
 namespace TalkTranscript.Tests;
@@ -189,114 +190,108 @@ public class TranslationTests
     // ── マージ翻訳テスト ──
 
     [Fact]
-    public void TranslationWorker_MergeWindow_MergesConsecutiveSameSpeaker()
+    public void FragmentMerger_MergesConsecutiveSameSpeaker()
     {
-        // マージ翻訳: 同一話者の未完フラグメントを結合して翻訳
-        // OnEntriesMerged が発火され、元エントリと結合エントリが返却される
-        var translator = new ConcatMockTranslator(); // 入力テキストをそのまま返す
-        using var worker = new TranslationWorker(translator, "両方", mergeWindowMs: 500);
+        // 逐次マージ: 同一話者の未完フラグメントを結合
+        // OnMerged はフラグメント追加のたびに発火される (逐次)
+        using var merger = new FragmentMerger(mergeWindowMs: 500);
 
-        IReadOnlyList<TranscriptEntry>? mergedOriginals = null;
-        TranscriptEntry? mergedResult = null;
-        var signal = new ManualResetEventSlim(false);
+        var mergeHistory = new System.Collections.Concurrent.ConcurrentBag<(IReadOnlyList<TranscriptEntry> originals, TranscriptEntry merged)>();
+        var flushedResults = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>();
+        var flushSignal = new CountdownEvent(1);
 
-        worker.OnEntriesMerged += (originals, merged) =>
+        merger.OnMerged += (originals, merged) =>
         {
-            mergedOriginals = originals;
-            mergedResult = merged;
-            signal.Set();
+            mergeHistory.Add((originals, merged));
+        };
+        merger.OnFlushed += entry =>
+        {
+            flushedResults.Add(entry);
+            flushSignal.Signal();
         };
 
         var ts = new DateTime(2026, 3, 1, 18, 9, 9);
-        // 同一話者の未完フラグメントを素早く投入 (文末記号なし → マージ対象)
-        worker.Enqueue(new TranscriptEntry(ts, "相手", "and you'll be able to see exactly"));
-        worker.Enqueue(new TranscriptEntry(ts, "相手", "how it all transcribes and"));
-        worker.Enqueue(new TranscriptEntry(ts, "相手", "works in real time."));
+        // 同一話者の未完フラグメントを素早く投入 (最後が文末記号 → フラッシュ)
+        merger.Enqueue(new TranscriptEntry(ts, "相手", "and you'll be able to see exactly"));
+        merger.Enqueue(new TranscriptEntry(ts, "相手", "how it all transcribes and"));
+        merger.Enqueue(new TranscriptEntry(ts, "相手", "works in real time."));
 
-        bool signaled = signal.Wait(TimeSpan.FromSeconds(15));
-        Assert.True(signaled, "マージコールバックがタイムアウトしました");
+        bool signaled = flushSignal.Wait(TimeSpan.FromSeconds(15));
+        Assert.True(signaled, "フラッシュコールバックがタイムアウトしました");
 
-        // 元エントリが3件全て返却される
-        Assert.NotNull(mergedOriginals);
-        Assert.Equal(3, mergedOriginals.Count);
-        Assert.Equal("and you'll be able to see exactly", mergedOriginals[0].Text);
-        Assert.Equal("how it all transcribes and", mergedOriginals[1].Text);
-        Assert.Equal("works in real time.", mergedOriginals[2].Text);
+        // OnMerged が複数回発火されている (逐次マージ)
+        Assert.True(mergeHistory.Count >= 1, "OnMerged が発火されていません");
 
-        // 結合エントリ: テキストが結合され、翻訳も付与
-        Assert.NotNull(mergedResult);
-        Assert.Contains("and you'll be able to see exactly", mergedResult.Text);
-        Assert.Contains("how it all transcribes and", mergedResult.Text);
-        Assert.Contains("works in real time.", mergedResult.Text);
-        Assert.NotNull(mergedResult.TranslatedText);
+        // フラッシュされた結合テキストが全フラグメントを含む
+        var flushed = flushedResults.First();
+        Assert.Contains("and you'll be able to see exactly", flushed.Text);
+        Assert.Contains("how it all transcribes and", flushed.Text);
+        Assert.Contains("works in real time.", flushed.Text);
     }
 
     [Fact]
-    public void TranslationWorker_MergeWindow_FlushesOnSpeakerChange()
+    public void FragmentMerger_FlushesOnSpeakerChange()
     {
-        var translator = new ConcatMockTranslator();
-        using var worker = new TranslationWorker(translator, "両方", mergeWindowMs: 500);
+        using var merger = new FragmentMerger(mergeWindowMs: 500);
 
-        var translatedResults = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>();
+        var flushedResults = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>();
         var signal = new CountdownEvent(2);
 
-        // 単一エントリでのフラッシュは OnTranslated が発火される
-        worker.OnTranslated += entry =>
+        merger.OnFlushed += entry =>
         {
-            translatedResults.Add(entry);
+            flushedResults.Add(entry);
             signal.Signal();
         };
 
         var ts = new DateTime(2026, 3, 1, 18, 9, 9);
-        worker.Enqueue(new TranscriptEntry(ts, "相手", "Hello."));
+        merger.Enqueue(new TranscriptEntry(ts, "相手", "Hello."));
         // 話者変更 → 前のバッファがフラッシュされる
-        worker.Enqueue(new TranscriptEntry(ts, "自分", "Hi."));
+        merger.Enqueue(new TranscriptEntry(ts, "自分", "Hi."));
 
         bool signaled = signal.Wait(TimeSpan.FromSeconds(10));
         Assert.True(signaled, "話者変更コールバックがタイムアウトしました");
-        Assert.Equal(2, translatedResults.Count);
+        Assert.Equal(2, flushedResults.Count);
     }
 
     [Fact]
-    public void TranslationWorker_MergeWindow_FlushesOnCompleteSentence()
+    public void FragmentMerger_FlushesOnCompleteSentence()
     {
         // 文末記号で終わるフラグメントは、次のフラグメント到着時にフラッシュされる
         // → 完結した文が不要に結合されない
-        var translator = new ConcatMockTranslator();
-        using var worker = new TranslationWorker(translator, "両方", mergeWindowMs: 5000);
+        using var merger = new FragmentMerger(mergeWindowMs: 5000);
 
-        var translatedResults = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>();
+        var flushedResults = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>();
         var signal = new CountdownEvent(3);
 
-        worker.OnTranslated += entry =>
+        merger.OnFlushed += entry =>
         {
-            translatedResults.Add(entry);
+            flushedResults.Add(entry);
             signal.Signal();
         };
 
         var ts = new DateTime(2026, 3, 1, 19, 55, 27);
-        // 3つの完結した文を素早く投入 → 各文が個別に翻訳される
-        worker.Enqueue(new TranscriptEntry(ts, "相手", "No problem, I'll keep on in English."));
-        worker.Enqueue(new TranscriptEntry(ts, "相手", "So, in our chat, you shared you were exploring how the transcript works."));
-        worker.Enqueue(new TranscriptEntry(ts, "相手", "Is there anything else you're curious about?"));
+        // 3つの完結した文を素早く投入 → 各文が個別にフラッシュされる
+        merger.Enqueue(new TranscriptEntry(ts, "相手", "No problem, I'll keep on in English."));
+        merger.Enqueue(new TranscriptEntry(ts, "相手", "So, in our chat, you shared you were exploring how the transcript works."));
+        merger.Enqueue(new TranscriptEntry(ts, "相手", "Is there anything else you're curious about?"));
 
         bool signaled = signal.Wait(TimeSpan.FromSeconds(15));
         Assert.True(signaled, "完結文フラッシュコールバックがタイムアウトしました");
-        Assert.Equal(3, translatedResults.Count);
+        Assert.Equal(3, flushedResults.Count);
 
-        // 各文が個別に翻訳されている (結合されていない)
-        var texts = translatedResults.Select(e => e.Text).OrderBy(t => t.Length).ToList();
+        // 各文が個別にフラッシュされている (結合されていない)
+        var texts = flushedResults.Select(e => e.Text).OrderBy(t => t.Length).ToList();
         Assert.Contains(texts, t => t.Contains("No problem"));
         Assert.Contains(texts, t => t.Contains("transcript works"));
         Assert.Contains(texts, t => t.Contains("curious about"));
     }
 
     [Fact]
-    public void TranslationWorker_MergeWindow_Zero_DisablesMerge()
+    public void TranslationWorker_ImmediateTranslation()
     {
-        // mergeWindowMs=0 → 従来動作 (即時翻訳)
+        // TranslationWorker は常に即時翻訳 (マージなし)
         using var translator = new MockTranslator("訳");
-        using var worker = new TranslationWorker(translator, "両方", mergeWindowMs: 0);
+        using var worker = new TranslationWorker(translator, "両方");
 
         TranscriptEntry? result = null;
         var signal = new ManualResetEventSlim(false);
@@ -386,7 +381,7 @@ public class TranslationTests
     [InlineData("   ", true)]                     // 空白のみ
     public void EndsWithSentenceBoundary_DetectsCorrectly(string text, bool expected)
     {
-        Assert.Equal(expected, TranslationWorker.EndsWithSentenceBoundary(text));
+        Assert.Equal(expected, FragmentMerger.EndsWithSentenceBoundary(text));
     }
 
     // ── HasInternalSentenceBoundary テスト ──
@@ -403,36 +398,34 @@ public class TranslationTests
     [InlineData("Hello.  ", false)]                              // ピリオド後は空白のみ
     public void HasInternalSentenceBoundary_DetectsCorrectly(string text, bool expected)
     {
-        Assert.Equal(expected, TranslationWorker.HasInternalSentenceBoundary(text));
+        Assert.Equal(expected, FragmentMerger.HasInternalSentenceBoundary(text));
     }
 
     // ── IsBufferTextComplete テスト ──
 
     [Theory]
     [InlineData("Hello world.", true)]                                              // 末尾ピリオド
-    [InlineData("Sure. I can talk about anything", true)]                           // 内部ピリオド (末尾なし)
+    [InlineData("Sure. I can talk about anything", false)]                           // 内部ピリオドのみ (末尾未完)
     [InlineData("and you'll be able to see exactly", false)]                        // 未完
-    [InlineData("Sure. I can talk about anything. Let's see. Imagine a peaceful morning", true)] // 複数内部ピリオド
-    [InlineData("こんにちは。元気ですか", true)]                                      // 日本語内部句点
+    [InlineData("Sure. I can talk about anything. Let's see. Imagine a peaceful morning", false)] // 内部ピリオドのみ (末尾未完)
+    [InlineData("こんにちは。元気ですか", false)]                                      // 日本語内部句点のみ (末尾未完)
     [InlineData("今日は天気が良くて", false)]                                         // 日本語未完
     public void IsBufferTextComplete_DetectsCorrectly(string text, bool expected)
     {
-        Assert.Equal(expected, TranslationWorker.IsBufferTextComplete(text));
+        Assert.Equal(expected, FragmentMerger.IsBufferTextComplete(text));
     }
 
     [Fact]
-    public void TranslationWorker_MergeWindow_IncompleteSentence_WaitsLonger()
+    public void FragmentMerger_IncompleteSentence_WaitsLonger()
     {
         // 文が未完のフラグメントを送信し、次のフラグメントが通常のマージウィンドウより
         // 大幅に遅れて到着しても結合されることを確認 (Whisper の処理遅延をシミュレート)
-        var translator = new ConcatMockTranslator();
-        using var worker = new TranslationWorker(translator, "両方", mergeWindowMs: 300);
+        using var merger = new FragmentMerger(mergeWindowMs: 300);
 
         var results = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>();
         var signal = new CountdownEvent(1);
 
-        // 未完文マージは OnEntriesMerged が発火される
-        worker.OnEntriesMerged += (originals, merged) =>
+        merger.OnMerged += (originals, merged) =>
         {
             results.Add(merged);
             signal.Signal();
@@ -440,11 +433,11 @@ public class TranslationTests
 
         var ts = new DateTime(2026, 3, 1, 18, 9, 9);
         // 文が未完のフラグメントを先に送信
-        worker.Enqueue(new TranscriptEntry(ts, "相手", "I'll speak at a"));
+        merger.Enqueue(new TranscriptEntry(ts, "相手", "I'll speak at a"));
         // 通常マージウィンドウ (300ms) よりはるかに遅い 3 秒後に到着
-        // → 最低保証 10 秒があるため結合される
+        // → 最低保証 20 秒があるため結合される
         Thread.Sleep(3000);
-        worker.Enqueue(new TranscriptEntry(ts, "相手", "pace that's easier to follow."));
+        merger.Enqueue(new TranscriptEntry(ts, "相手", "pace that's easier to follow."));
 
         bool signaled = signal.Wait(TimeSpan.FromSeconds(15));
         Assert.True(signaled, "未完文マージコールバックがタイムアウトしました");

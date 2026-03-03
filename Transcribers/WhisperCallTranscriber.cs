@@ -132,7 +132,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     /// <summary>最大バッファ秒数 (長い発話でもここで強制処理) — BackpressureMonitor で動的に調整される</summary>
     private const double DefaultMaxBufferSec = 8.0;
     /// <summary>発話中インターバル処理秒数。無音を待たずにこの長さでチャンクを分割して応答速度を向上する</summary>
-    private const double IntermediateProcessingSec = 5.0;
+    private const double IntermediateProcessingSec = 3.0;
     /// <summary>短い発話を救済する長い無音判定時間 (ms)。バッファが最小長未満でもこの時間無音が続けば処理する</summary>
     private const int LongSilenceMs = 2000;
     /// <summary>エネルギーベースの VAD 閾値 (平均 RMS がこの値を超えたら音声あり)</summary>
@@ -452,7 +452,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
             // 初回チャンクは早めに処理して応答速度を優先
             if (firstChunk)
-                maxBytes = Math.Min(maxBytes, (int)(TargetFormat.SampleRate * 2 * 2.5));
+                maxBytes = Math.Min(maxBytes, (int)(TargetFormat.SampleRate * 2 * 2.0));
 
             // 発話中インターバル処理の閾値 (バイト単位)
             int intermediateBytes = (int)(TargetFormat.SampleRate * 2 * IntermediateProcessingSec);
