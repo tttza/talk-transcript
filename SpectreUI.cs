@@ -30,6 +30,11 @@ internal sealed class SpectreUI
     private int _testSeconds;
     private DateTime _startTime;
 
+    // ── 言語・翻訳表示 ──
+    private volatile string _language = "ja";
+    private volatile string? _translationSrc;
+    private volatile string? _translationTgt;
+
     // ── 音量メーター (#2) ──
     private volatile float _micVolume;
     private volatile float _speakerVolume;
@@ -55,6 +60,14 @@ internal sealed class SpectreUI
         _fileName = fileName;
         _isTest = test;
         _testSeconds = testSec;
+    }
+
+    /// <summary>認識言語・翻訳方向を設定する (スレッドセーフ)</summary>
+    public void SetLanguageInfo(string language, string? translationSrc = null, string? translationTgt = null)
+    {
+        _language = language;
+        _translationSrc = translationSrc;
+        _translationTgt = translationTgt;
     }
 
     /// <summary>認識結果を追加する (スレッドセーフ)</summary>
@@ -252,6 +265,8 @@ internal sealed class SpectreUI
             AddBookmark();
             OnBookmarkRequested?.Invoke();
         }
+        if (key.Key == ConsoleKey.L && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            return "swap_lang";
 
         // ── スクロール操作 ──
         if (key.Key == ConsoleKey.UpArrow || key.Key == ConsoleKey.PageUp)
@@ -297,18 +312,25 @@ internal sealed class SpectreUI
         // ══════════════════════════════════════════
         //  ヘッダー (固定 3 行: バナー / ステータス+音量 / 区切り線)
         // ══════════════════════════════════════════
-        // 1行目: エンジン + デバイス + ファイル名
+        // 1行目: エンジン + デバイス
         var gpuTag = _engine.StartsWith("whisper")
             ? (_useGpu ? $"[green]{FormatGpuBackendTag(_gpuBackend)}[/]" : "[dim]CPU[/]")
             : "";
-        var bannerLine =
+        var bannerLine1 =
             $"  [white bold]{Markup.Escape(_engine.ToUpperInvariant())}[/]" +
             (gpuTag.Length > 0 ? $" ({gpuTag})" : "") +
-            $"  [dim]│[/]  [cyan]🎤 {Markup.Escape(TruncateDevice(_micName))}[/]" +
-            $"  [dim]│[/]  [yellow]🔊 {Markup.Escape(TruncateDevice(_speakerName))}[/]" +
+            $"  [dim]│[/]  [cyan]🎤 {Markup.Escape(ExtractDeviceName(_micName))}[/]" +
+            $"  [dim]│[/]  [yellow]🔊 {Markup.Escape(ExtractDeviceName(_speakerName))}[/]";
+
+        // 2行目: 言語/翻訳 + ファイル名
+        var langTag = _translationSrc != null && _translationTgt != null
+            ? $"🌐 {Markup.Escape(_translationSrc)}→{Markup.Escape(_translationTgt)}"
+            : $"🌐 {Markup.Escape(_language)}";
+        var bannerLine2 =
+            $"  {langTag}" +
             $"  [dim]│[/]  [dim]→[/] {Markup.Escape(_fileName)}";
 
-        // 2行目: ステータス + 音量メーター
+        // 3行目: ステータス + 音量メーター
         var statusParts = new List<string> { "[green]●[/]" };
         statusParts.Add($"{elapsed:hh\\:mm\\:ss}");
         if (_isTest)
@@ -316,25 +338,16 @@ internal sealed class SpectreUI
         statusParts.Add(BuildVolumeBar("🎤", _micVolume, "cyan"));
         statusParts.Add(BuildVolumeBar("🔊", _speakerVolume, "yellow"));
 
-        // バナーの表示テキスト (Markup タグを除いた実テキスト) の表示幅で折り返し行数を計算
-        var bannerPlain =
-            "  " + _engine.ToUpperInvariant() +
-            (_engine.StartsWith("whisper") ? (_useGpu ? $" ({FormatGpuBackendTag(_gpuBackend)})" : " (CPU)") : "") +
-            "  │  🎤 " + TruncateDevice(_micName) +
-            "  │  🔊 " + TruncateDevice(_speakerName) +
-            "  │  → " + _fileName;
-
         int consoleWidth;
         try { consoleWidth = Console.WindowWidth; } catch { consoleWidth = 80; }
-        int bannerLines = Math.Max(1, (int)Math.Ceiling(
-            (double)EstimateDisplayWidth(bannerPlain) / Math.Max(1, consoleWidth)));
 
         var header = new Rows(
-            new Markup(bannerLine),
+            new Markup(bannerLine1),
+            new Markup(bannerLine2),
             new Markup("  " + string.Join("  ", statusParts)),
             new Rule().RuleStyle("dim"));
 
-        int headerSize = bannerLines + 2;  // バナー(N行) + 音量(1行) + 区切り線(1行)
+        int headerSize = 4;  // バナー1行目 + 2行目 + 音量 + 区切り線
 
         // ══════════════════════════════════════════
         //  フッター (固定 3 行: 空行 / 区切り線 / キーガイド)
@@ -352,6 +365,7 @@ internal sealed class SpectreUI
             var guide = "  [white bold]Ctrl+Q[/] [dim]停止[/]  │  " +
                 "[white bold]F2[/] [dim]設定[/]  │  " +
                 "[white bold]Ctrl+B[/] [dim]ブックマーク[/]  │  " +
+                "[white bold]Ctrl+L[/] [dim]翻訳言語入替[/]  │  " +
                 "[white bold]↑↓[/][dim]/[/][white bold]PgUp PgDn[/] [dim]スクロール[/]";
             if (scrollOff > 0)
                 guide += "  │  [white bold]End[/] [dim]最新へ[/]";
@@ -477,8 +491,8 @@ internal sealed class SpectreUI
     /// <summary>スクロール用: 大まかな最大表示件数 (キー入力でのオフセット上限計算に使用)</summary>
     private int EstimateMaxEntries()
     {
-        // ヘッダー(2) + フッター(3) + ボディオーバーヘッド(2) = 7
-        int overhead = 7 + _processing.Count;
+        // ヘッダー(4) + フッター(3) + ボディオーバーヘッド(2) = 9
+        int overhead = 9 + _processing.Count;
         try { return Math.Max(3, Console.WindowHeight - overhead); }
         catch { return 20; }
     }
@@ -558,8 +572,8 @@ internal sealed class SpectreUI
         AnsiConsole.MarkupLine(
             $"  [white bold]{Markup.Escape(engine.ToUpperInvariant())}[/]" +
             (gpuTag.Length > 0 ? $" ({gpuTag})" : "") +
-            $"  [dim]│[/]  [cyan]🎤 {Markup.Escape(TruncateDevice(mic))}[/]" +
-            $"  [dim]│[/]  [yellow]🔊 {Markup.Escape(TruncateDevice(speaker))}[/]" +
+            $"  [dim]│[/]  [cyan]🎤 {Markup.Escape(ExtractDeviceName(mic))}[/]" +
+            $"  [dim]│[/]  [yellow]🔊 {Markup.Escape(ExtractDeviceName(speaker))}[/]" +
             $"  [dim]│[/]  [dim]→[/] {Markup.Escape(fileName)}");
     }
 
@@ -573,9 +587,19 @@ internal sealed class SpectreUI
         _ => "GPU"
     };
 
-    /// <summary>デバイス名が長い場合に短縮する</summary>
-    private static string TruncateDevice(string name)
+    /// <summary>デバイス名の本体部分だけを抽出する。
+    /// "ヘッドセット マイク (Loop120 by Shokz)" → "Loop120 by Shokz"
+    /// 括弧がなければそのまま返す (長い場合は短縮)。</summary>
+    private static string ExtractDeviceName(string name)
     {
+        // Windows デバイス名は "種別 (デバイス名)" 形式が多い
+        int open = name.IndexOf('(');
+        int close = name.LastIndexOf(')');
+        if (open >= 0 && close > open + 1)
+        {
+            string inner = name.Substring(open + 1, close - open - 1).Trim();
+            if (inner.Length > 0) return inner;
+        }
         const int max = 30;
         return name.Length <= max ? name : name[..(max - 1)] + "…";
     }

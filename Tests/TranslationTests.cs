@@ -58,7 +58,7 @@ public class TranslationTests
     [Theory]
     [InlineData("ja", "en", true)]
     [InlineData("en", "zh", true)]
-    [InlineData("en", "ja", false)]
+    [InlineData("en", "ja", true)]
     [InlineData("en", "ko", false)]
     [InlineData("xx", "yy", false)]
     public void LanguagePairs_IsSupported(string src, string tgt, bool expected)
@@ -186,6 +186,137 @@ public class TranslationTests
         worker.Dispose();
     }
 
+    // ── マージ翻訳テスト ──
+
+    [Fact]
+    public void TranslationWorker_MergeWindow_MergesConsecutiveSameSpeaker()
+    {
+        // マージ翻訳: 同一話者の連続フラグメントを結合して翻訳
+        var translator = new ConcatMockTranslator(); // 入力テキストをそのまま返す
+        using var worker = new TranslationWorker(translator, "両方", mergeWindowMs: 500);
+
+        var results = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>();
+        var signal = new CountdownEvent(3);
+
+        worker.OnTranslated += entry =>
+        {
+            results.Add(entry);
+            signal.Signal();
+        };
+
+        var ts = new DateTime(2026, 3, 1, 18, 9, 9);
+        // 同一話者の3フラグメントを素早く投入
+        worker.Enqueue(new TranscriptEntry(ts, "相手", "Hello world."));
+        worker.Enqueue(new TranscriptEntry(ts, "相手", "How are you?"));
+        worker.Enqueue(new TranscriptEntry(ts, "相手", "Nice day."));
+
+        bool signaled = signal.Wait(TimeSpan.FromSeconds(10));
+        Assert.True(signaled, "マージ翻訳コールバックがタイムアウトしました");
+        Assert.Equal(3, results.Count);
+
+        // 結合翻訳が使われたことを確認: translator が受け取ったテキストが結合されている
+        Assert.True(translator.LastInput?.Contains("Hello world.") == true);
+        Assert.True(translator.LastInput?.Contains("How are you?") == true);
+        Assert.True(translator.LastInput?.Contains("Nice day.") == true);
+    }
+
+    [Fact]
+    public void TranslationWorker_MergeWindow_FlushesOnSpeakerChange()
+    {
+        var translator = new ConcatMockTranslator();
+        using var worker = new TranslationWorker(translator, "両方", mergeWindowMs: 500);
+
+        var results = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>();
+        var signal = new CountdownEvent(2);
+
+        worker.OnTranslated += entry =>
+        {
+            results.Add(entry);
+            signal.Signal();
+        };
+
+        var ts = new DateTime(2026, 3, 1, 18, 9, 9);
+        worker.Enqueue(new TranscriptEntry(ts, "相手", "Hello."));
+        // 話者変更 → 前のバッファがフラッシュされる
+        worker.Enqueue(new TranscriptEntry(ts, "自分", "Hi."));
+
+        bool signaled = signal.Wait(TimeSpan.FromSeconds(10));
+        Assert.True(signaled, "話者変更コールバックがタイムアウトしました");
+        Assert.Equal(2, results.Count);
+    }
+
+    [Fact]
+    public void TranslationWorker_MergeWindow_Zero_DisablesMerge()
+    {
+        // mergeWindowMs=0 → 従来動作 (即時翻訳)
+        using var translator = new MockTranslator("訳");
+        using var worker = new TranslationWorker(translator, "両方", mergeWindowMs: 0);
+
+        TranscriptEntry? result = null;
+        var signal = new ManualResetEventSlim(false);
+
+        worker.OnTranslated += entry =>
+        {
+            result = entry;
+            signal.Set();
+        };
+
+        worker.Enqueue(new TranscriptEntry(DateTime.Now, "相手", "Hello"));
+
+        bool signaled = signal.Wait(TimeSpan.FromSeconds(5));
+        Assert.True(signaled, "即時翻訳コールバックがタイムアウトしました");
+        Assert.Equal("訳", result?.TranslatedText);
+    }
+
+    // ── SplitTranslation テスト ──
+
+    [Fact]
+    public void SplitTranslation_SingleEntry_ReturnsWholeText()
+    {
+        var entries = new List<TranscriptEntry>
+        {
+            new(DateTime.Now, "相手", "Hello world")
+        };
+        var result = TranslationWorker.SplitTranslation("こんにちは世界", entries);
+        Assert.Single(result);
+        Assert.Equal("こんにちは世界", result[0]);
+    }
+
+    [Fact]
+    public void SplitTranslation_MultipleSentences_DistributesProportionally()
+    {
+        var entries = new List<TranscriptEntry>
+        {
+            new(DateTime.Now, "相手", "Hello."),         // 短い
+            new(DateTime.Now, "相手", "How are you doing today? Fine thanks.") // 長い
+        };
+        var result = TranslationWorker.SplitTranslation(
+            "こんにちは。今日の調子はどう？元気だよ。", entries);
+
+        Assert.Equal(2, result.Count);
+        // 両方が空でないこと
+        Assert.False(string.IsNullOrWhiteSpace(result[0]));
+        Assert.False(string.IsNullOrWhiteSpace(result[1]));
+    }
+
+    [Fact]
+    public void SplitIntoSentences_SplitsOnPunctuation()
+    {
+        var sentences = TranslationWorker.SplitIntoSentences("こんにちは。元気ですか？はい！");
+        Assert.Equal(3, sentences.Count);
+        Assert.Equal("こんにちは。", sentences[0]);
+        Assert.Equal("元気ですか？", sentences[1]);
+        Assert.Equal("はい！", sentences[2]);
+    }
+
+    [Fact]
+    public void SplitIntoSentences_HandlesNoPunctuation()
+    {
+        var sentences = TranslationWorker.SplitIntoSentences("こんにちは世界");
+        Assert.Single(sentences);
+        Assert.Equal("こんにちは世界", sentences[0]);
+    }
+
     // ── ModelManager テスト ──
 
     [Fact]
@@ -206,6 +337,22 @@ public class TranslationTests
 
         public MockTranslator(string translation) => _translation = translation;
         public string? Translate(string text) => _translation;
+        public void Dispose() { }
+    }
+
+    /// <summary>入力テキストをそのまま返すモック翻訳エンジン (結合テスト用)</summary>
+    private class ConcatMockTranslator : ITranslator
+    {
+        public bool IsReady => true;
+        public string SourceLanguage => "en";
+        public string TargetLanguage => "ja";
+        public string? LastInput { get; private set; }
+
+        public string? Translate(string text)
+        {
+            LastInput = text;
+            return text; // 入力をそのまま返す
+        }
         public void Dispose() { }
     }
 }

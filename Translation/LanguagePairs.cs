@@ -10,11 +10,13 @@ public static class LanguagePairs
     /// <remarks>
     /// onnx-community の ONNX 変換済みモデルを使用。
     /// Helsinki-NLP のオリジナルリポには ONNX ファイルが含まれないため使用不可。
-    /// en→ja / en→ko は ONNX 版が公開されていないため現在未サポート。
+    /// en→ja は staka/fugumt-en-ja を ONNX 変換した tttza/fugumt-en-ja-onnx を使用。
+    /// en→ko は ONNX 版が公開されていないため現在未サポート。
     /// </remarks>
     private static readonly Dictionary<string, LanguagePairInfo> Pairs = new(StringComparer.OrdinalIgnoreCase)
     {
         ["ja-en"] = new("onnx-community/opus-mt-ja-en", "日本語 → 英語"),
+        ["en-ja"] = new("tttza/fugumt-en-ja-onnx", "英語 → 日本語"),
         ["en-zh"] = new("onnx-community/opus-mt-en-zh", "英語 → 中国語"),
         ["zh-en"] = new("onnx-community/opus-mt-zh-en", "中国語 → 英語"),
         ["ko-en"] = new("onnx-community/opus-mt-ko-en", "韓国語 → 英語"),
@@ -55,8 +57,10 @@ public static class LanguagePairs
     {
         var info = GetInfo(sourceLang, targetLang);
         if (info == null) return null;
-        // Optimum による ONNX 変換済みモデルの URL パターン
-        return $"https://huggingface.co/{info.HuggingFaceRepo}/resolve/main/onnx/";
+        // onnx-community リポは onnx/ サブフォルダ、それ以外はルート
+        bool isOnnxCommunity = info.HuggingFaceRepo.StartsWith("onnx-community/", StringComparison.OrdinalIgnoreCase);
+        string subPath = isOnnxCommunity ? "onnx/" : "";
+        return $"https://huggingface.co/{info.HuggingFaceRepo}/resolve/main/{subPath}";
     }
 
     /// <summary>サポートされている全言語ペアを返す</summary>
@@ -77,4 +81,7 @@ public static class LanguagePairs
 }
 
 /// <summary>言語ペアの情報</summary>
-public record LanguagePairInfo(string HuggingFaceRepo, string Description);
+/// <param name="HuggingFaceRepo">Hugging Face のリポジトリ名</param>
+/// <param name="Description">表示用説明</param>
+/// <param name="NeedsOnnxConversion">true の場合、PyTorch モデルを Optimum で ONNX 変換する必要がある</param>
+public record LanguagePairInfo(string HuggingFaceRepo, string Description, bool NeedsOnnxConversion = false);

@@ -81,6 +81,15 @@ public class AppSettings
     /// <summary>翻訳で GPU を使用するか</summary>
     public bool TranslationUseGpu { get; set; } = true;
 
+    /// <summary>
+    /// 翻訳マージウィンドウ (ミリ秒)。
+    /// 同一話者の連続フラグメントをこの時間内にバッファリングし、
+    /// 結合して一括翻訳することで文脈を保持した翻訳を行う。
+    /// 0 = マージ無効 (従来動作)。推奨値: 1500。
+    /// </summary>
+    public int TranslationMergeWindowMs { get; set; } = 1500;
+
+
     // ── GPU バックエンド ヘルパー ──
 
     /// <summary>

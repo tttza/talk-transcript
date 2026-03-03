@@ -40,7 +40,10 @@ public static class DeviceSelector
         using var enumerator = new MMDeviceEnumerator();
 
         // ── マイク選択 ──
-        AnsiConsole.MarkupLine("  [cyan]── マイクデバイスを選択 ──[/]");
+        AnsiConsole.MarkupLine("  [bold cyan]マイク[/]");
+        if (!string.IsNullOrEmpty(settings.MicrophoneDeviceName))
+            AnsiConsole.MarkupLine($"  [dim]現在: {Markup.Escape(settings.MicrophoneDeviceName)}[/]");
+        AnsiConsole.WriteLine();
         var mic = SelectDevice(
             enumerator,
             DataFlow.Capture,
@@ -52,7 +55,10 @@ public static class DeviceSelector
         AnsiConsole.WriteLine();
 
         // ── スピーカー選択 ──
-        AnsiConsole.MarkupLine("  [cyan]── スピーカーデバイスを選択 ──[/]");
+        AnsiConsole.MarkupLine("  [bold cyan]スピーカー[/]");
+        if (!string.IsNullOrEmpty(settings.SpeakerDeviceName))
+            AnsiConsole.MarkupLine($"  [dim]現在: {Markup.Escape(settings.SpeakerDeviceName)}[/]");
+        AnsiConsole.WriteLine();
         var speaker = SelectDevice(
             enumerator,
             DataFlow.Render,
@@ -105,7 +111,7 @@ public static class DeviceSelector
         // 選択肢を構築
         var choices = devices.Select((d, i) =>
         {
-            string marker = (savedIndex == i) ? " ★前回" : "";
+            string marker = (savedIndex == i) ? " ← 現在" : "";
             return $"{Markup.Remove(d.FriendlyName)}{marker}";
         }).ToList();
 
@@ -120,7 +126,7 @@ public static class DeviceSelector
 
         var selected = AnsiConsole.Prompt(
             new SelectionPrompt<string>()
-                .Title("[cyan]  ↑↓で移動, Enterで確定:[/]")
+                .Title("[cyan]  選択:[/]")
                 .PageSize(10)
                 .HighlightStyle(Style.Parse("bold cyan"))
                 .AddChoices(orderedChoices));

@@ -189,17 +189,36 @@ public static class ModelManager
     public static string? GetTranslationModelPath(string sourceLang, string targetLang)
     {
         string dir = Path.Combine(ModelsDir, TranslationModelDirName(sourceLang, targetLang));
-        return Directory.Exists(dir)
-            && File.Exists(Path.Combine(dir, "encoder_model.onnx"))
-            && File.Exists(Path.Combine(dir, "decoder_model.onnx"))
-            && File.Exists(Path.Combine(dir, "decoder_with_past_model.onnx"))
-            && File.Exists(Path.Combine(dir, "vocab.json"))
-            ? dir : null;
+        if (!Directory.Exists(dir)) return null;
+        if (!File.Exists(Path.Combine(dir, "encoder_model.onnx"))) return null;
+        if (!File.Exists(Path.Combine(dir, "decoder_model.onnx"))) return null;
+        if (!File.Exists(Path.Combine(dir, "decoder_with_past_model.onnx"))) return null;
+        if (!File.Exists(Path.Combine(dir, "vocab.json"))) return null;
+
+        // モデルソースの整合性チェック (別リポのキャッシュが残っている場合に再取得)
+        var info = LanguagePairs.GetInfo(sourceLang, targetLang);
+        if (info != null)
+        {
+            string markerPath = Path.Combine(dir, ".model_source");
+            if (File.Exists(markerPath))
+            {
+                string cached = File.ReadAllText(markerPath).Trim();
+                if (!string.Equals(cached, info.HuggingFaceRepo, StringComparison.OrdinalIgnoreCase))
+                {
+                    Logging.AppLogger.Info($"翻訳モデルソース変更検出: {cached} → {info.HuggingFaceRepo}。再取得します。");
+                    try { Directory.Delete(dir, true); } catch { }
+                    return null;
+                }
+            }
+        }
+
+        return dir;
     }
 
     /// <summary>
     /// 翻訳モデル (Helsinki-NLP Opus-MT ONNX) をダウンロードする。
-    /// 個別ファイルを Hugging Face から取得する。
+    /// ONNX 変換済みリポからはファイルを直接取得する。
+    /// PyTorch のみのモデルは Optimum CLI で ONNX に変換する。
     /// </summary>
     public static async Task<string> EnsureTranslationModelAsync(string sourceLang, string targetLang)
     {
@@ -214,12 +233,30 @@ public static class ModelManager
         }
 
         // 言語ペア確認
-        string? baseUrl = LanguagePairs.GetModelBaseUrl(sourceLang, targetLang);
-        if (baseUrl == null)
+        var info = LanguagePairs.GetInfo(sourceLang, targetLang);
+        if (info == null)
             throw new NotSupportedException($"未サポートの言語ペア: {sourceLang} → {targetLang}");
 
         Directory.CreateDirectory(modelDir);
 
+        if (info.NeedsOnnxConversion)
+        {
+            // PyTorch → ONNX 変換が必要
+            await ConvertModelToOnnxAsync(info, sourceLang, targetLang, modelDir);
+        }
+        else
+        {
+            // ONNX 変換済みリポから直接ダウンロード
+            await DownloadOnnxModelAsync(info, sourceLang, targetLang, modelDir);
+        }
+
+        return modelDir;
+    }
+
+    /// <summary>ONNX 変換済みリポから翻訳モデルファイルをダウンロードする</summary>
+    private static async Task DownloadOnnxModelAsync(
+        LanguagePairInfo info, string sourceLang, string targetLang, string modelDir)
+    {
         Console.ForegroundColor = ConsoleColor.Yellow;
         Console.WriteLine($"[翻訳モデル] {sourceLang}→{targetLang} モデルをダウンロード中...");
         Console.ResetColor();
@@ -227,8 +264,6 @@ public static class ModelManager
         using var http = new HttpClient();
         http.Timeout = TimeSpan.FromMinutes(30);
         http.DefaultRequestHeaders.UserAgent.ParseAdd("TalkTranscript/1.0");
-
-        var info = LanguagePairs.GetInfo(sourceLang, targetLang)!;
 
         foreach (string file in LanguagePairs.RequiredFiles)
         {
@@ -240,9 +275,11 @@ public static class ModelManager
             }
 
             // ファイル URL を構築
-            // ONNX モデルは onnx/ サブディレクトリに、SPM/config は直下にある場合がある
+            // onnx-community リポは onnx/ サブディレクトリに ONNX ファイルがある
+            // それ以外のリポ (tttza/* 等) は全ファイルがルートにある
             string url;
-            if (file.EndsWith(".onnx"))
+            bool isOnnxCommunity = info.HuggingFaceRepo.StartsWith("onnx-community/", StringComparison.OrdinalIgnoreCase);
+            if (file.EndsWith(".onnx") && isOnnxCommunity)
                 url = $"https://huggingface.co/{info.HuggingFaceRepo}/resolve/main/onnx/{file}";
             else
                 url = $"https://huggingface.co/{info.HuggingFaceRepo}/resolve/main/{file}";
@@ -304,7 +341,171 @@ public static class ModelManager
         Console.WriteLine($"[翻訳モデル] 準備完了: {modelDir}");
         Console.ResetColor();
 
-        return modelDir;
+        // モデルソースを記録 (キャッシュ整合性チェック用)
+        WriteModelSourceMarker(modelDir, info.HuggingFaceRepo);
+    }
+
+    /// <summary>
+    /// PyTorch モデルを Python Optimum CLI で ONNX に変換する。
+    /// 初回のみ変換が必要で、結果はキャッシュされる。
+    /// </summary>
+    private static async Task ConvertModelToOnnxAsync(
+        LanguagePairInfo info, string sourceLang, string targetLang, string modelDir)
+    {
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine($"[翻訳モデル] {sourceLang}→{targetLang} モデルを ONNX に変換します (初回のみ)...");
+        Console.ResetColor();
+
+        // Python の存在確認
+        string? pythonCmd = FindPython();
+        if (pythonCmd == null)
+        {
+            try { Directory.Delete(modelDir, true); } catch { }
+            throw new InvalidOperationException(
+                $"{sourceLang}→{targetLang} の翻訳モデル ({info.HuggingFaceRepo}) は ONNX 変換が必要です。\n" +
+                "  Python がインストールされていないため変換できません。\n" +
+                "  Python 3.9 以降をインストールして PATH に追加してください。\n" +
+                "  https://www.python.org/downloads/");
+        }
+
+        // optimum[exporters] のインストール確認 & インストール
+        Console.WriteLine("  Python パッケージを確認中...");
+        if (!await IsOptimumInstalled(pythonCmd))
+        {
+            Console.WriteLine("  optimum[exporters] をインストール中 (初回のみ)...");
+            var installResult = await RunProcessAsync(pythonCmd,
+                "-m pip install --quiet optimum[exporters] transformers sentencepiece protobuf",
+                timeoutSeconds: 300);
+            if (installResult.ExitCode != 0)
+            {
+                try { Directory.Delete(modelDir, true); } catch { }
+                throw new InvalidOperationException(
+                    $"optimum のインストールに失敗しました:\n{installResult.StdErr}");
+            }
+            Console.WriteLine("  ✓ optimum[exporters] インストール完了");
+        }
+
+        // Optimum CLI で ONNX 変換
+        Console.WriteLine($"  {info.HuggingFaceRepo} → ONNX 変換中 (数分かかる場合があります)...");
+        var convertResult = await RunProcessAsync(pythonCmd,
+            $"-m optimum.exporters.onnx --model {info.HuggingFaceRepo} " +
+            $"--task text2text-generation-with-past \"{modelDir}\"",
+            timeoutSeconds: 600);
+
+        if (convertResult.ExitCode != 0)
+        {
+            Logging.AppLogger.Error($"ONNX 変換失敗:\n{convertResult.StdErr}");
+            try { Directory.Delete(modelDir, true); } catch { }
+            throw new InvalidOperationException(
+                $"ONNX 変換に失敗しました。詳細はログを確認してください。\n{convertResult.StdErr}");
+        }
+
+        // Optimum は config.json 等もコピーするが、
+        // encoder/decoder の ONNX ファイルがサブフォルダに出る場合に対応
+        MoveOnnxFilesToRoot(modelDir);
+
+        // 必須ファイルの確認
+        foreach (string file in LanguagePairs.RequiredFiles)
+        {
+            if (file == "tokenizer_config.json") continue; // オプショナル
+            if (!File.Exists(Path.Combine(modelDir, file)))
+            {
+                Logging.AppLogger.Error($"ONNX 変換後に {file} が見つかりません (dir: {modelDir})");
+                try { Directory.Delete(modelDir, true); } catch { }
+                throw new InvalidOperationException(
+                    $"ONNX 変換後に必要なファイル {file} が生成されませんでした。");
+            }
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"[翻訳モデル] ONNX 変換完了: {modelDir}");
+        Console.ResetColor();
+
+        // モデルソースを記録 (キャッシュ整合性チェック用)
+        WriteModelSourceMarker(modelDir, info.HuggingFaceRepo);
+    }
+
+    /// <summary>ONNX ファイルが onnx/ サブフォルダにある場合はルートに移動する</summary>
+    private static void MoveOnnxFilesToRoot(string modelDir)
+    {
+        string onnxSubDir = Path.Combine(modelDir, "onnx");
+        if (!Directory.Exists(onnxSubDir)) return;
+
+        foreach (var file in Directory.GetFiles(onnxSubDir, "*.onnx"))
+        {
+            string dest = Path.Combine(modelDir, Path.GetFileName(file));
+            if (!File.Exists(dest))
+                File.Move(file, dest);
+        }
+        // サブフォルダが空なら削除
+        try
+        {
+            if (Directory.GetFiles(onnxSubDir).Length == 0)
+                Directory.Delete(onnxSubDir, true);
+        }
+        catch { }
+    }
+
+    /// <summary>Python コマンドを探す (python / python3 / py)</summary>
+    private static string? FindPython()
+    {
+        foreach (var cmd in new[] { "python", "python3", "py" })
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(cmd, "--version")
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+                using var proc = System.Diagnostics.Process.Start(psi);
+                proc?.WaitForExit(5000);
+                if (proc?.ExitCode == 0) return cmd;
+            }
+            catch { }
+        }
+        return null;
+    }
+
+    /// <summary>optimum がインストール済みか確認する</summary>
+    private static async Task<bool> IsOptimumInstalled(string pythonCmd)
+    {
+        var result = await RunProcessAsync(pythonCmd,
+            "-c \"import optimum; import transformers\"", timeoutSeconds: 15);
+        return result.ExitCode == 0;
+    }
+
+    /// <summary>外部プロセスを実行して結果を返す</summary>
+    private static async Task<(int ExitCode, string StdOut, string StdErr)> RunProcessAsync(
+        string command, string arguments, int timeoutSeconds = 60)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo(command, arguments)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            // pip install 時の文字化けを防ぐ
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
+            StandardErrorEncoding = System.Text.Encoding.UTF8,
+        };
+
+        using var proc = System.Diagnostics.Process.Start(psi)
+                         ?? throw new InvalidOperationException($"プロセス起動失敗: {command}");
+
+        var stdOutTask = proc.StandardOutput.ReadToEndAsync();
+        var stdErrTask = proc.StandardError.ReadToEndAsync();
+
+        bool exited = proc.WaitForExit(timeoutSeconds * 1000);
+        if (!exited)
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { }
+            return (-1, "", $"タイムアウト ({timeoutSeconds}秒)");
+        }
+
+        return (proc.ExitCode, await stdOutTask, await stdErrTask);
     }
 
 
@@ -313,5 +514,18 @@ public static class ModelManager
         using var contentStream = await response.Content.ReadAsStreamAsync();
         using var fileStream = File.Create(path);
         await contentStream.CopyToAsync(fileStream);
+    }
+
+    /// <summary>モデルソースを記録するマーカーファイルを書き込む</summary>
+    private static void WriteModelSourceMarker(string modelDir, string repoName)
+    {
+        try
+        {
+            File.WriteAllText(Path.Combine(modelDir, ".model_source"), repoName);
+        }
+        catch (Exception ex)
+        {
+            Logging.AppLogger.Warn($"モデルソースマーカー書き込み失敗: {ex.Message}");
+        }
     }
 }
