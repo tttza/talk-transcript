@@ -407,7 +407,7 @@ internal sealed class SpectreUI
             var guide = "  [white bold]Ctrl+Q[/] [silver]停止[/]  │  " +
                 "[white bold]F2[/] [silver]設定[/]  │  " +
                 "[white bold]Ctrl+B[/] [silver]ブックマーク[/]  │  " +
-                "[white bold]Ctrl+L[/] [silver]翻訳言語入替[/]  │  " +
+                "[white bold]Ctrl+L[/] [silver]言語切替[/]  │  " +
                 "[white bold]↑↓[/][silver]/[/][white bold]PgUp PgDn[/] [silver]スクロール[/]";
             if (scrollOff > 0)
                 guide += "  │  [white bold]End[/] [silver]最新へ[/]";

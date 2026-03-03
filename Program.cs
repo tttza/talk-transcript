@@ -195,6 +195,8 @@ else if (!string.IsNullOrEmpty(settings.Language))
 {
     language = settings.Language;
 }
+// Ctrl+L で en ⇔ 非en言語を切り替えるための記憶変数
+string lastNonEnLang = string.Equals(language, "en", StringComparison.OrdinalIgnoreCase) ? "ja" : language;
 AppLogger.Info($"認識言語: {ConfigMenu.FormatLanguageDisplay(language)}");
 AnsiConsole.MarkupLine($"  [dim]言語:[/] {Markup.Escape(ConfigMenu.FormatLanguageDisplay(language))}");
 
@@ -686,6 +688,9 @@ while (!quit)
             // --lang 引数が指定されていればそちらを優先
             if (langIdx < 0)
                 language = !string.IsNullOrEmpty(settings.Language) ? settings.Language : "ja";
+            // Ctrl+L 用の代替言語を更新
+            if (!string.Equals(language, "en", StringComparison.OrdinalIgnoreCase))
+                lastNonEnLang = language;
             // 出力フォーマット再読み込み (--format 引数がなければ設定から)
             var argsFormats = EngineSelector.ParseFormats(args);
             extraFormats = argsFormats.Count > 0
@@ -758,8 +763,9 @@ while (!quit)
             break;
 
         case "swap_lang":
-            // 翻訳言語ペアを入れ替える (src⇔tgt を入れ替え) + 認識言語も連動
+            if (settings.EnableTranslation)
             {
+                // 翻訳有効時: 翻訳言語ペアを入れ替える (src⇔tgt を入れ替え) + 認識言語も連動
                 var (oldSrc, oldTgt) = ResolveTranslationPair(settings, language);
                 // 翻訳元・翻訳先を入れ替え
                 settings.TranslationSourceLang = oldTgt;
@@ -776,7 +782,6 @@ while (!quit)
                 else
                 {
                     // 認識言語も翻訳元に合わせて切り替え
-                    // (例: ja→en を en→ja に入れ替えたら、認識言語も ja→en に変更)
                     language = newSrc;
                     settings.Language = language;
                     settings.Save();
@@ -787,6 +792,25 @@ while (!quit)
                     await InitTranslationAsync();
                     ui.SetLanguageInfo(language, newSrc, newTgt);
                 }
+            }
+            else
+            {
+                // 翻訳無効時: 認識言語を en ⇔ 非en言語 でトグル
+                string prevLang = language;
+                if (string.Equals(language, "en", StringComparison.OrdinalIgnoreCase))
+                {
+                    language = lastNonEnLang;
+                }
+                else
+                {
+                    lastNonEnLang = language;
+                    language = "en";
+                }
+                settings.Language = language;
+                settings.Save();
+                AppLogger.Info($"認識言語を {prevLang} → {language} に切り替えました");
+                AnsiConsole.MarkupLine($"  [green]→ 認識言語: {ConfigMenu.FormatLanguageDisplay(language)}[/]");
+                ui.SetLanguageInfo(language);
             }
             break;
     }
