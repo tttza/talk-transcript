@@ -280,8 +280,10 @@ TranslationWorker? translationWorker = null;
 /// <returns>(翻訳元, 翻訳先) のタプル。</returns>
 (string src, string tgt) ResolveTranslationPair(AppSettings s, string recogLang)
 {
-    // 翻訳元 = 認識言語 (auto の場合はフォールバック)
-    string src = (recogLang != "auto" ? recogLang : null) ?? "en";
+    // 翻訳元 = TranslationSourceLang が明示設定されていればそれを優先、なければ認識言語
+    string src = s.TranslationSourceLang
+                 ?? (recogLang != "auto" ? recogLang : null)
+                 ?? "en";
     string tgt = s.TranslationTargetLang;
 
     // 同一言語ペアの回避: 翻訳先を自動調整
@@ -715,22 +717,32 @@ while (!quit)
             break;
 
         case "swap_lang":
-            // 翻訳言語ペアを入れ替える (翻訳先を現在の翻訳元に変更)
+            // 翻訳言語ペアを入れ替える (src⇔tgt を入れ替え) + 認識言語も連動
             {
                 var (oldSrc, oldTgt) = ResolveTranslationPair(settings, language);
-                // 翻訳先を入れ替え (翻訳元は常に認識言語なので変更不要)
+                // 翻訳元・翻訳先を入れ替え
+                settings.TranslationSourceLang = oldTgt;
                 settings.TranslationTargetLang = oldSrc;
                 settings.Save();
                 var (newSrc, newTgt) = ResolveTranslationPair(settings, language);
                 if (newSrc == oldSrc && newTgt == oldTgt)
                 {
-                    AnsiConsole.MarkupLine($"  [yellow]⚠ {language}→{oldSrc} は未サポートのため {oldSrc}→{oldTgt} のまま継続します。[/]");
+                    AnsiConsole.MarkupLine($"  [yellow]⚠ {oldTgt}→{oldSrc} は未サポートのため {oldSrc}→{oldTgt} のまま継続します。[/]");
+                    settings.TranslationSourceLang = null;
                     settings.TranslationTargetLang = oldTgt;
                     settings.Save();
                 }
                 else
                 {
+                    // 認識言語も翻訳元に合わせて切り替え
+                    // (例: ja→en を en→ja に入れ替えたら、認識言語も ja→en に変更)
+                    language = newSrc;
+                    settings.Language = language;
+                    settings.Save();
+                    AppLogger.Info($"認識言語を {oldSrc} → {newSrc} に切り替えました");
+
                     AnsiConsole.MarkupLine($"  [green]→ 翻訳方向を入れ替えました: {oldSrc}→{oldTgt} ⇒ {newSrc}→{newTgt}[/]");
+                    AnsiConsole.MarkupLine($"  [green]→ 認識言語: {newSrc}[/]");
                     await InitTranslationAsync();
                     ui.SetLanguageInfo(language, newSrc, newTgt);
                 }

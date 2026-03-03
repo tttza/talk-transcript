@@ -68,6 +68,14 @@ public sealed class TranslationWorker : IDisposable
             if (entry.Speaker != _translationTarget) return;
         }
 
+        // テキストが翻訳元言語らしくない場合はスキップ
+        // (例: en→ja モデルに日本語テキストを渡すと <unk> が大量発生する)
+        if (!LooksLikeSourceLanguage(entry.Text, _translator.SourceLanguage))
+        {
+            AppLogger.Debug($"テキストが翻訳元言語 ({_translator.SourceLanguage}) と異なるためスキップ: \"{entry.Text}\"");
+            return;
+        }
+
         try
         {
             if (!_queue.TryAdd(new TranslationRequest(entry)))
@@ -382,6 +390,63 @@ public sealed class TranslationWorker : IDisposable
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// テキストが指定した翻訳元言語らしいかを簡易判定する。
+    /// CJK 文字 (ひらがな/カタカナ/漢字/ハングル) の比率で判定し、
+    /// 翻訳元言語と明らかに異なるテキストをフィルタする。
+    /// </summary>
+    internal static bool LooksLikeSourceLanguage(string text, string sourceLang)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+
+        // 句読点・空白・記号を除いた文字数でカウント
+        int total = 0;
+        int cjkCount = 0;     // 漢字・ひらがな・カタカナ
+        int hangulCount = 0;  // ハングル
+
+        foreach (char c in text)
+        {
+            if (char.IsWhiteSpace(c) || char.IsPunctuation(c) || char.IsSymbol(c))
+                continue;
+            total++;
+
+            // ひらがな U+3040-309F, カタカナ U+30A0-30FF, CJK統合漢字 U+4E00-9FFF,
+            // CJK互換漢字 U+F900-FAFF, CJK拡張A U+3400-4DBF
+            if ((c >= '\u3040' && c <= '\u309F') ||
+                (c >= '\u30A0' && c <= '\u30FF') ||
+                (c >= '\u4E00' && c <= '\u9FFF') ||
+                (c >= '\uF900' && c <= '\uFAFF') ||
+                (c >= '\u3400' && c <= '\u4DBF'))
+            {
+                cjkCount++;
+            }
+            // ハングル U+AC00-D7A3, ハングル字母 U+1100-11FF, U+3130-318F
+            else if ((c >= '\uAC00' && c <= '\uD7A3') ||
+                     (c >= '\u1100' && c <= '\u11FF') ||
+                     (c >= '\u3130' && c <= '\u318F'))
+            {
+                hangulCount++;
+            }
+        }
+
+        if (total == 0) return false;
+
+        double cjkRatio = (double)cjkCount / total;
+        double hangulRatio = (double)hangulCount / total;
+
+        return sourceLang.ToLowerInvariant() switch
+        {
+            // 日本語ソース: テキストに CJK 文字が 30% 以上含まれるべき
+            "ja" => cjkRatio >= 0.3,
+            // 中国語ソース: テキストに CJK 文字 (漢字) が 30% 以上含まれるべき
+            "zh" => cjkRatio >= 0.3,
+            // 韓国語ソース: テキストにハングルが 30% 以上含まれるべき
+            "ko" => hangulRatio >= 0.3,
+            // ラテン文字系言語 (en, fr, de, es 等): CJK/ハングルが 30% 未満であるべき
+            _ => (cjkRatio + hangulRatio) < 0.3,
+        };
     }
 
     public void Dispose()

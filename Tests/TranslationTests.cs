@@ -317,6 +317,26 @@ public class TranslationTests
         Assert.Equal("こんにちは世界", sentences[0]);
     }
 
+    // ── LooksLikeSourceLanguage テスト ──
+
+    [Theory]
+    [InlineData("Hello world", "en", true)]           // 英語テキスト → en ソースOK
+    [InlineData("こんにちは世界", "en", false)]        // 日本語テキスト → en ソースNG
+    [InlineData("次の動画でお会いしましょう", "en", false)] // 日本語テキスト → en ソースNG
+    [InlineData("こんにちは世界", "ja", true)]         // 日本語テキスト → ja ソースOK
+    [InlineData("Hello world", "ja", false)]          // 英語テキスト → ja ソースNG
+    [InlineData("テスト123", "ja", true)]              // 日本語主体 → ja ソースOK
+    [InlineData("한국어 텍스트", "ko", true)]           // 韓国語テキスト → ko ソースOK
+    [InlineData("한국어 텍스트", "en", false)]          // 韓国語テキスト → en ソースNG
+    [InlineData("中文测试", "zh", true)]               // 中国語テキスト → zh ソースOK
+    [InlineData("Bonjour le monde", "fr", true)]      // フランス語テキスト → fr ソースOK
+    [InlineData("", "en", false)]                     // 空文字列 → false
+    [InlineData("   ", "ja", false)]                  // 空白のみ → false
+    public void LooksLikeSourceLanguage_DetectsCorrectly(string text, string sourceLang, bool expected)
+    {
+        Assert.Equal(expected, TranslationWorker.LooksLikeSourceLanguage(text, sourceLang));
+    }
+
     // ── ModelManager テスト ──
 
     [Fact]
