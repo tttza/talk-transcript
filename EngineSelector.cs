@@ -28,7 +28,7 @@ internal static class EngineSelector
     public static string? SelectEngine(string currentEngine, HardwareInfo.EnvironmentProfile hwProfile)
     {
         // 環境情報表示
-        bool hasGpu = hwProfile.HasNvidiaGpu || hwProfile.HasAmdGpu;
+        bool hasGpu = hwProfile.HasAnyGpu;
         if (hasGpu)
         {
             string backendLabel = hwProfile.HasNvidiaGpu ? "CUDA" : "Vulkan";

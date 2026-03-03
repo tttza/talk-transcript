@@ -21,6 +21,9 @@ internal static class HardwareInfo
         public int CpuCores { get; init; }
         public long SystemRamMB { get; init; }
 
+        /// <summary>いずれかの GPU を搭載しているか (NVIDIA / AMD / Intel)</summary>
+        public bool HasAnyGpu => HasNvidiaGpu || HasAmdGpu || HasIntelGpu;
+
         /// <summary>この環境に最適な既定エンジン名</summary>
         public string RecommendedEngine { get; init; } = "vosk";
         /// <summary>GPU を使うべきか</summary>
@@ -99,6 +102,20 @@ internal static class HardwareInfo
             useGpu = true;
             gpuBackend = GpuBackend.Vulkan;
         }
+        else if (hasIntel && vram >= 4000)
+        {
+            // Intel GPU 4GB+: Vulkan で small
+            engine = "whisper-small";
+            useGpu = true;
+            gpuBackend = GpuBackend.Vulkan;
+        }
+        else if (hasIntel && vram >= 2000)
+        {
+            // Intel GPU 2-4GB: Vulkan で base
+            engine = "whisper-base";
+            useGpu = true;
+            gpuBackend = GpuBackend.Vulkan;
+        }
         else if (cpuCores >= 8 && ramMB >= 8000)
         {
             // 高性能 CPU (Ryzen 等): CPU で small まで実用的
@@ -154,7 +171,7 @@ internal static class HardwareInfo
 
     private static string GetWhisperRating(EnvironmentProfile env, long requiredVramMB, int requiredCores, long requiredRamMB)
     {
-        bool hasGpu = env.HasNvidiaGpu || env.HasAmdGpu;
+        bool hasGpu = env.HasAnyGpu;
         if (hasGpu && env.GpuVramMB >= requiredVramMB)
             return "★";  // GPU で快適
         if (!hasGpu && env.CpuCores >= requiredCores && env.SystemRamMB >= requiredRamMB)
@@ -232,8 +249,15 @@ internal static class HardwareInfo
         if (n.Contains("1650")) return 4096;
         // Fallback for NVIDIA
         if (n.Contains("NVIDIA")) return 4096;
-        // Intel
-        if (n.Contains("INTEL")) return 0; // 共有メモリ
+        // Intel Arc series (専用 VRAM を搭載)
+        if (n.Contains("ARC A770")) return 16384;
+        if (n.Contains("ARC A750")) return 8192;
+        if (n.Contains("ARC A580")) return 8192;
+        if (n.Contains("ARC A380")) return 6144;
+        if (n.Contains("ARC A310")) return 4096;
+        if (n.Contains("ARC")) return 6144; // Arc 汎用フォールバック
+        // Intel iGPU (共有メモリ — Vulkan 対応だが専用 VRAM なし)
+        if (n.Contains("INTEL")) return 0;
         return 2048; // 安全な最小値
     }
 

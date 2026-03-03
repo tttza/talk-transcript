@@ -275,7 +275,9 @@ internal static class ConfigMenu
         else if (hwProfile.HasAmdGpu)
             AnsiConsole.MarkupLine($"  [dim]GPU:[/] [white]{Markup.Escape(hwProfile.GpuName)} ({hwProfile.GpuVramMB / 1024}GB) - AMD[/]");
         else if (hwProfile.HasIntelGpu)
-            AnsiConsole.MarkupLine($"  [dim]GPU:[/] [white]{Markup.Escape(hwProfile.GpuName)} - Intel[/]");
+            AnsiConsole.MarkupLine($"  [dim]GPU:[/] [white]{Markup.Escape(hwProfile.GpuName)} ({hwProfile.GpuVramMB / 1024}GB) - Intel[/]");
+        else if (!hwProfile.HasAnyGpu)
+            AnsiConsole.MarkupLine($"  [dim]GPU:[/] [dim]検出されませんでした[/]");
         AnsiConsole.WriteLine();
 
         // 選択肢を構築
@@ -668,6 +670,7 @@ internal static class ConfigMenu
             settings.TranslationTargetLang = fresh.TranslationTargetLang;
             settings.TranslationTarget = fresh.TranslationTarget;
             settings.TranslationUseGpu = fresh.TranslationUseGpu;
+            settings.GpuBackendName = fresh.GpuBackendName;
 
             AnsiConsole.MarkupLine("  [green]設定をリセットしました。[/]");
         }

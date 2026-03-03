@@ -600,6 +600,12 @@ while (!quit)
                 gpuBackend = settings.EngineName != null ? settings.EffectiveGpuBackend : hwProfile.RecommendedGpuBackend;
                 resolvedBackend = ResolveGpuBackend(gpuBackend, hwProfile);
                 useGpu = resolvedBackend != GpuBackend.None;
+
+                // GPU バックエンドが変更された場合、ランタイムを再セットアップ
+                if (resolvedBackend == GpuBackend.Cuda)
+                    CudaHelper.SetupRuntime();
+                else if (resolvedBackend == GpuBackend.Vulkan)
+                    VulkanHelper.SetupRuntime();
             }
             // セッション開始時刻は Start() 成功後に自動リセットされるため、ここでは不要
             // プロセス優先度を再適用
