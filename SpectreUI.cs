@@ -362,13 +362,13 @@ internal sealed class SpectreUI
         };
         if (!_isTest)
         {
-            var guide = "  [white bold]Ctrl+Q[/] [dim]停止[/]  │  " +
-                "[white bold]F2[/] [dim]設定[/]  │  " +
-                "[white bold]Ctrl+B[/] [dim]ブックマーク[/]  │  " +
-                "[white bold]Ctrl+L[/] [dim]翻訳言語入替[/]  │  " +
-                "[white bold]↑↓[/][dim]/[/][white bold]PgUp PgDn[/] [dim]スクロール[/]";
+            var guide = "  [white bold]Ctrl+Q[/] [silver]停止[/]  │  " +
+                "[white bold]F2[/] [silver]設定[/]  │  " +
+                "[white bold]Ctrl+B[/] [silver]ブックマーク[/]  │  " +
+                "[white bold]Ctrl+L[/] [silver]翻訳言語入替[/]  │  " +
+                "[white bold]↑↓[/][silver]/[/][white bold]PgUp PgDn[/] [silver]スクロール[/]";
             if (scrollOff > 0)
-                guide += "  │  [white bold]End[/] [dim]最新へ[/]";
+                guide += "  │  [white bold]End[/] [silver]最新へ[/]";
             footerRows.Add(new Markup(guide));
         }
         var footer = new Rows(footerRows);

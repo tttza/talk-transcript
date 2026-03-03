@@ -92,6 +92,10 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     private readonly AdaptiveNoiseGate _micNoiseGate = new();
     private readonly AdaptiveNoiseGate _spkNoiseGate = new();
 
+    // ── 自動ゲイン制御 (AGC) ──
+    private readonly AutoGainControl _micAgc;
+    private readonly AutoGainControl _spkAgc;
+
     // ── 音量通知 (#2) ──
     private volatile float _lastMicPeak;
     private volatile float _lastSpkPeak;
@@ -157,6 +161,8 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     /// <param name="language">認識言語 ("ja", "en", "auto" など)</param>
     /// <param name="enableRecording">true で録音バッファを保持する (後処理用)</param>
     /// <param name="maxCpuThreads">Whisper 推論スレッド数 (0 = 自動)</param>
+    /// <param name="audioBoostEnabled">AGC (自動ゲイン制御) を有効にするか</param>
+    /// <param name="audioBoostMaxGain">AGC の最大ゲイン倍率</param>
     public WhisperCallTranscriber(
         string whisperModelPath,
         string modelSize,
@@ -165,7 +171,9 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         bool useGpu = true,
         string language = "ja",
         bool enableRecording = false,
-        int maxCpuThreads = 0)
+        int maxCpuThreads = 0,
+        bool audioBoostEnabled = false,
+        int audioBoostMaxGain = 10)
     {
         _factory = WhisperFactory.FromPath(whisperModelPath, new WhisperFactoryOptions { UseGpu = useGpu });
         _modelSize = modelSize;
@@ -182,6 +190,11 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         // バックプレッシャー制御を初期化
         _micBackpressure = new BackpressureMonitor(DefaultMinBufferSec, DefaultMaxBufferSec);
         _spkBackpressure = new BackpressureMonitor(DefaultMinBufferSec, DefaultMaxBufferSec);
+
+        // AGC (自動ゲイン制御) を初期化
+        float maxGain = Math.Clamp(audioBoostMaxGain, 1, 20);
+        _micAgc = new AutoGainControl(targetRms: 3000f, maxGain: maxGain) { Enabled = audioBoostEnabled };
+        _spkAgc = new AutoGainControl(targetRms: 3000f, maxGain: maxGain) { Enabled = audioBoostEnabled };
 
         int deviceNumber = DeviceHelper.FindWaveInDevice(micDevice, "Whisper");
         _micCapture = new WaveInEvent
@@ -236,6 +249,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         if (e.BytesRecorded == 0 || _stopping) return;
 
         _micChunks++;
+
+        // AGC (自動ゲイン制御): IsVoice 判定の前にゲインを適用し、
+        // 小さい声がノイズゲートを通過できるようにする。
+        // ノイズフロアの Update にはゲイン適用後の RMS を使う
+        // (ゲイン適用後の信号でノイズフロアを再推定する設計)。
+        _micAgc.Process(e.Buffer, e.BytesRecorded);
 
         short peak = AudioProcessing.CalcPeak(e.Buffer, e.BytesRecorded);
         float rms = AudioProcessing.CalcRms(e.Buffer, e.BytesRecorded);
@@ -302,6 +321,9 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         byte[] converted = AudioProcessing.ConvertLoopbackToTarget(
             e.Buffer, e.BytesRecorded, _loopbackFormat!, TargetFormat);
         if (converted.Length == 0) return;
+
+        // AGC (自動ゲイン制御): ノイズゲート判定の前にゲインを適用
+        _spkAgc.Process(converted, converted.Length);
 
         // 無音スキップ: アダプティブノイズゲート判定
         short peak = AudioProcessing.CalcPeak(converted, converted.Length);

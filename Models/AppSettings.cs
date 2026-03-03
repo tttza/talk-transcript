@@ -81,6 +81,21 @@ public class AppSettings
     /// <summary>翻訳で GPU を使用するか</summary>
     public bool TranslationUseGpu { get; set; } = true;
 
+    // ── 音声ブースト (AGC) ──
+
+    /// <summary>
+    /// 自動ゲイン制御 (AGC) を有効にするか。
+    /// 声が小さい場合に自動的に音量を増幅し、認識精度を向上させる。
+    /// </summary>
+    public bool AudioBoostEnabled { get; set; } = false;
+
+    /// <summary>
+    /// 音声ブーストの最大ゲイン倍率 (1〜20)。
+    /// 値が大きいほど小さい声を強く増幅するが、ノイズも増幅される。
+    /// 推奨: 5〜10。
+    /// </summary>
+    public int AudioBoostMaxGain { get; set; } = 10;
+
     /// <summary>
     /// 翻訳マージウィンドウ (ミリ秒)。
     /// 同一話者の連続フラグメントをこの時間内にバッファリングし、

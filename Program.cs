@@ -72,6 +72,10 @@ if (engineName.StartsWith("whisper-"))
     whisperModelSize = engineName.Substring("whisper-".Length); // "tiny", "base" etc.
 
 // ── GPU バックエンド解決 & ランタイムセットアップ ──
+AnsiConsole.WriteLine();
+AnsiConsole.Write(new Rule("[white bold]TalkTranscript 起動[/]").RuleStyle("dim").LeftJustified());
+AnsiConsole.MarkupLine($"  [dim]エンジン:[/] [white bold]{Markup.Escape(engineName.ToUpperInvariant())}[/]");
+
 GpuBackend resolvedBackend = GpuBackend.None;
 
 if (useGpu || gpuBackend == GpuBackend.Auto)
@@ -105,9 +109,12 @@ if (useGpu || gpuBackend == GpuBackend.Auto)
             {
                 AnsiConsole.MarkupLine("    Vulkan 対応 GPU ドライバがインストールされていることを確認してください。");
             }
-            AnsiConsole.WriteLine();
         }
     }
+}
+else
+{
+    AnsiConsole.MarkupLine("  [dim]GPU: 無効 (CPU モード)[/]");
 }
 
 /// <summary>
@@ -189,6 +196,7 @@ else if (!string.IsNullOrEmpty(settings.Language))
     language = settings.Language;
 }
 AppLogger.Info($"認識言語: {ConfigMenu.FormatLanguageDisplay(language)}");
+AnsiConsole.MarkupLine($"  [dim]言語:[/] {Markup.Escape(ConfigMenu.FormatLanguageDisplay(language))}");
 
 // ── 出力フォーマット設定 (#1) ──
 var extraFormats = EngineSelector.ParseFormats(args);
@@ -220,6 +228,9 @@ else
 {
     (micDevice, speakerDevice) = DeviceSelector.SelectDevices(settings);
 }
+
+AnsiConsole.MarkupLine($"  [cyan]🎤 {Markup.Escape(micDevice.FriendlyName)}[/]");
+AnsiConsole.MarkupLine($"  [yellow]🔊 {Markup.Escape(speakerDevice.FriendlyName)}[/]");
 
 // ── ファイル出力準備 (セッション全体で1ファイル) (#5) ──
 string outputDir;
@@ -342,6 +353,8 @@ async Task InitTranslationAsync()
 
 await InitTranslationAsync();
 
+AnsiConsole.WriteLine();
+
 // ── セッションループ ──
 // Ctrl+D/E で停止→設定変更→再開、Ctrl+Q で終了
 bool quit = false;
@@ -380,44 +393,59 @@ while (!quit)
         ? engineName.Substring("whisper-".Length)
         : null;
 
-    // ── トランスクライバ作成 ──
+    // ── トランスクライバ作成 (スピナー表示付き) ──
     // 後処理 (Whisper 再認識) が可能な場合、または録音保存が有効な場合に録音バッファを有効化
     bool canPostProcess = whisperModelSize == null
         && (ModelManager.GetWhisperModelPath("base") != null || ModelManager.GetWhisperModelPath("tiny") != null);
     bool enableRecording = canPostProcess || settings.SaveRecording;
 
-    ICallTranscriber callTranscriber;
-    if (whisperModelSize != null)
+    ICallTranscriber callTranscriber = null!;
+    await AnsiConsole.Status()
+        .Spinner(Spinner.Known.Dots)
+        .SpinnerStyle(Style.Parse("cyan"))
+        .StartAsync("エンジンを準備中...", async ctx =>
     {
-        string wModelPath = await ModelManager.EnsureWhisperModelAsync(whisperModelSize);
-        callTranscriber = new WhisperCallTranscriber(wModelPath, whisperModelSize, micDevice, speakerDevice, useGpu, language,
-            enableRecording: settings.SaveRecording, maxCpuThreads: settings.MaxCpuThreads);
-    }
-    else if (engineName == "vosk")
-    {
-        string voskModelPath = await ModelManager.EnsureVoskModelAsync();
-        var voskModel = new Model(voskModelPath);
-        callTranscriber = new VoskCallTranscriber(voskModel, micDevice, speakerDevice,
-            ownsModel: true, enableRecording: enableRecording);
-    }
-    else
-    {
-        string sapiCulture = language switch
+        if (whisperModelSize != null)
         {
-            "auto" => "ja-JP",
-            var l when l.Contains('-') => l,
-            "ja" => "ja-JP",
-            "en" => "en-US",
-            "zh" => "zh-CN",
-            "ko" => "ko-KR",
-            "fr" => "fr-FR",
-            "de" => "de-DE",
-            "es" => "es-ES",
-            _ => language + "-" + language.ToUpperInvariant()
-        };
-        callTranscriber = new SapiCallTranscriber(micDevice, speakerDevice, sapiCulture,
-            enableRecording: enableRecording);
-    }
+            ctx.Status($"Whisper {whisperModelSize} モデルを準備中...");
+            string wModelPath = await ModelManager.EnsureWhisperModelAsync(whisperModelSize);
+
+            ctx.Status($"Whisper {whisperModelSize} モデルをロード中...");
+            callTranscriber = new WhisperCallTranscriber(wModelPath, whisperModelSize, micDevice, speakerDevice, useGpu, language,
+                enableRecording: settings.SaveRecording, maxCpuThreads: settings.MaxCpuThreads,
+                audioBoostEnabled: settings.AudioBoostEnabled, audioBoostMaxGain: settings.AudioBoostMaxGain);
+        }
+        else if (engineName == "vosk")
+        {
+            ctx.Status("Vosk モデルを準備中...");
+            string voskModelPath = await ModelManager.EnsureVoskModelAsync();
+
+            ctx.Status("Vosk モデルをロード中...");
+            var voskModel = new Model(voskModelPath);
+            callTranscriber = new VoskCallTranscriber(voskModel, micDevice, speakerDevice,
+                ownsModel: true, enableRecording: enableRecording);
+        }
+        else
+        {
+            ctx.Status("SAPI エンジンを準備中...");
+            string sapiCulture = language switch
+            {
+                "auto" => "ja-JP",
+                var l when l.Contains('-') => l,
+                "ja" => "ja-JP",
+                "en" => "en-US",
+                "zh" => "zh-CN",
+                "ko" => "ko-KR",
+                "fr" => "fr-FR",
+                "de" => "de-DE",
+                "es" => "es-ES",
+                _ => language + "-" + language.ToUpperInvariant()
+            };
+            callTranscriber = new SapiCallTranscriber(micDevice, speakerDevice, sapiCulture,
+                enableRecording: enableRecording);
+        }
+    });
+    AnsiConsole.MarkupLine($"  [green]✓ {Markup.Escape(engineName.ToUpperInvariant())} エンジン準備完了[/]");
 
     lastTranscriber = callTranscriber;
     int sessionMic = 0, sessionSpk = 0;

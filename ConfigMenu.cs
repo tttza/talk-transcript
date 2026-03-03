@@ -131,6 +131,10 @@ internal static class ConfigMenu
         string priorityVal = FormatPriorityDisplay(settings.ProcessPriority);
         string resourceVal = $"{threadVal} / {priorityVal}";
 
+        string boostVal = settings.AudioBoostEnabled
+            ? $"有効 (最大{settings.AudioBoostMaxGain}倍)"
+            : "無効";
+
         return new MenuItem[]
         {
             MenuItem.Separator("エンジン・GPU"),
@@ -140,6 +144,7 @@ internal static class ConfigMenu
             MenuItem.Separator("認識・翻訳"),
             new("言語",              langVal,     () => ConfigureLanguage(settings)),
             new("翻訳",              transVal,    () => ConfigureTranslation(settings)),
+            new("音声ブースト",      boostVal,    () => ConfigureAudioBoost(settings)),
 
             MenuItem.Separator("入出力"),
             new("デバイス",          devicesVal,  () => ConfigureDevices(settings)),
@@ -856,6 +861,50 @@ internal static class ConfigMenu
         };
     }
 
+    private static void ConfigureAudioBoost(AppSettings settings)
+    {
+        string curBoost = settings.AudioBoostEnabled
+            ? $"有効 (最大{settings.AudioBoostMaxGain}倍)"
+            : "無効";
+        PrintSubHeader("音声ブースト (AGC)", curBoost);
+
+        AnsiConsole.MarkupLine("  [dim]声が小さい場合に自動的に音量を増幅し、認識精度を向上させます。[/]");
+        AnsiConsole.MarkupLine("  [dim]ノイズも増幅されるため、静かな環境での使用を推奨します。[/]");
+        AnsiConsole.WriteLine();
+
+        settings.AudioBoostEnabled = AnsiConsole.Confirm("  音声ブースト (AGC) を有効にしますか?", settings.AudioBoostEnabled);
+
+        if (settings.AudioBoostEnabled)
+        {
+            var gainChoices = new[]
+            {
+                "5 — 控えめ (ノイズ少)",
+                "8 — バランス",
+                "10 — 標準 (推奨)",
+                "15 — 強め (声が非常に小さい場合)",
+                "20 — 最大 (ノイズ注意)",
+            };
+
+            var gainChoice = AnsiConsole.Prompt(
+                new SelectionPrompt<string>()
+                    .Title("[cyan]  最大ゲイン倍率:[/]")
+                    .HighlightStyle(Style.Parse("bold cyan"))
+                    .AddChoices(gainChoices));
+            settings.AudioBoostMaxGain = int.Parse(gainChoice.Split(' ')[0]);
+        }
+
+        settings.Save();
+        string detail = settings.AudioBoostEnabled
+            ? $"有効 (最大{settings.AudioBoostMaxGain}倍)"
+            : "無効";
+        PrintSaved("音声ブースト", detail);
+        if (settings.AudioBoostEnabled)
+        {
+            AnsiConsole.MarkupLine("  [dim]次のセッションから適用されます。[/]");
+            AnsiConsole.WriteLine();
+        }
+    }
+
     private static void ResetSettings(AppSettings settings)
     {
         PrintSubHeader("設定リセット");
@@ -889,6 +938,8 @@ internal static class ConfigMenu
             settings.TranslationUseGpu = fresh.TranslationUseGpu;
             settings.TranslationMergeWindowMs = fresh.TranslationMergeWindowMs;
             settings.GpuBackendName = fresh.GpuBackendName;
+            settings.AudioBoostEnabled = fresh.AudioBoostEnabled;
+            settings.AudioBoostMaxGain = fresh.AudioBoostMaxGain;
 
             PrintSaved("リセット", "すべての設定を初期値に戻しました");
         }
