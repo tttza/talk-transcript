@@ -104,6 +104,10 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     private readonly object _micProcessorLock = new();
     private readonly object _spkProcessorLock = new();
 
+    // ── ProcessChunk 用 MemoryStream 再利用 (毎回の new を回避) ──
+    private readonly MemoryStream _micWavStream = new();
+    private readonly MemoryStream _spkWavStream = new();
+
     // ── 自動ゲイン制御 (AGC) ──
     private readonly AutoGainControl _micAgc;
     private readonly AutoGainControl _spkAgc;
@@ -126,7 +130,9 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     /// <summary>最小バッファ秒数 (短すぎるチャンクは精度が低い) — BackpressureMonitor で動的に調整される</summary>
     private const double DefaultMinBufferSec = 2.0;
     /// <summary>最大バッファ秒数 (長い発話でもここで強制処理) — BackpressureMonitor で動的に調整される</summary>
-    private const double DefaultMaxBufferSec = 12.0;
+    private const double DefaultMaxBufferSec = 8.0;
+    /// <summary>発話中インターバル処理秒数。無音を待たずにこの長さでチャンクを分割して応答速度を向上する</summary>
+    private const double IntermediateProcessingSec = 5.0;
     /// <summary>短い発話を救済する長い無音判定時間 (ms)。バッファが最小長未満でもこの時間無音が続けば処理する</summary>
     private const int LongSilenceMs = 2000;
     /// <summary>エネルギーベースの VAD 閾値 (平均 RMS がこの値を超えたら音声あり)</summary>
@@ -136,21 +142,26 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     private int _micChunks;
     private int _speakerChunks;
 
+    // ── Entries キャッシュ (ToList() の毎回アロケーションを回避) ──
+    private List<TranscriptEntry>? _cachedEntries;
+    private List<TranscriptEntry>? _cachedMicEntries;
+    private List<TranscriptEntry>? _cachedSpkEntries;
+
     private static readonly WaveFormat TargetFormat = new(16000, 16, 1);
 
     public IReadOnlyList<TranscriptEntry> Entries
     {
-        get { lock (_lock) return _entries.ToList(); }
+        get { lock (_lock) return _cachedEntries ??= _entries.ToList(); }
     }
 
     public IReadOnlyList<TranscriptEntry> MicEntries
     {
-        get { lock (_lock) return _entries.Where(e => e.Speaker == "自分").ToList(); }
+        get { lock (_lock) return _cachedMicEntries ??= _entries.Where(e => e.Speaker == "自分").ToList(); }
     }
 
     public IReadOnlyList<TranscriptEntry> SpeakerEntries
     {
-        get { lock (_lock) return _entries.Where(e => e.Speaker == "相手").ToList(); }
+        get { lock (_lock) return _cachedSpkEntries ??= _entries.Where(e => e.Speaker == "相手").ToList(); }
     }
 
     public event Action<TranscriptEntry>? OnTranscribed;
@@ -310,11 +321,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 long dropped = _micBuffer.Length;
                 int keep = (int)(capacity / 2);
                 keep = keep - (keep % 2); // サンプル境界 (16bit=2bytes) にアライン
-                byte[] tail = new byte[keep];
-                _micBuffer.Position = _micBuffer.Length - keep;
-                _micBuffer.Read(tail, 0, keep);
-                _micBuffer.SetLength(0);
-                _micBuffer.Write(tail, 0, tail.Length);
+                // GetBuffer() で内部バッファを直接参照し、一時配列確保を回避
+                byte[] buf = _micBuffer.GetBuffer();
+                long srcOffset = _micBuffer.Length - keep;
+                Buffer.BlockCopy(buf, (int)srcOffset, buf, 0, keep);
+                _micBuffer.SetLength(keep);
+                _micBuffer.Position = keep;
                 _micBackpressure.ReportDropped(dropped - keep);
                 AppLogger.Warn($"[Whisper] マイクバッファ溢れ: {(dropped - keep) / 1024}KB 破棄");
             }
@@ -378,11 +390,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 long dropped = _speakerBuffer.Length;
                 int keep = (int)(capacity / 2);
                 keep = keep - (keep % 2); // サンプル境界 (16bit=2bytes) にアライン
-                byte[] tail = new byte[keep];
-                _speakerBuffer.Position = _speakerBuffer.Length - keep;
-                _speakerBuffer.Read(tail, 0, keep);
-                _speakerBuffer.SetLength(0);
-                _speakerBuffer.Write(tail, 0, tail.Length);
+                // GetBuffer() で内部バッファを直接参照し、一時配列確保を回避
+                byte[] buf = _speakerBuffer.GetBuffer();
+                long srcOffset = _speakerBuffer.Length - keep;
+                Buffer.BlockCopy(buf, (int)srcOffset, buf, 0, keep);
+                _speakerBuffer.SetLength(keep);
+                _speakerBuffer.Position = keep;
                 _spkBackpressure.ReportDropped(dropped - keep);
                 AppLogger.Warn($"[Whisper] スピーカーバッファ溢れ: {(dropped - keep) / 1024}KB 破棄");
             }
@@ -437,9 +450,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             int minBytes = (int)(TargetFormat.SampleRate * 2 * backpressure.CurrentMinBufferSec);
             int maxBytes = (int)(TargetFormat.SampleRate * 2 * backpressure.CurrentMaxBufferSec);
 
-            // 初回チャンクは早めに処理して応答速度を優先 (5秒→3秒)
+            // 初回チャンクは早めに処理して応答速度を優先
             if (firstChunk)
-                maxBytes = Math.Min(maxBytes, (int)(TargetFormat.SampleRate * 2 * 3.0));
+                maxBytes = Math.Min(maxBytes, (int)(TargetFormat.SampleRate * 2 * 2.5));
+
+            // 発話中インターバル処理の閾値 (バイト単位)
+            int intermediateBytes = (int)(TargetFormat.SampleRate * 2 * IntermediateProcessingSec);
 
             byte[]? pcmData = null;
 
@@ -463,6 +479,16 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 }
                 bool energySilence = avgEnergy < VadEnergyThreshold && energyHistory.Count >= 3;
 
+                // 発話中インターバル処理: 無音を待たずに一定間隔でチャンクを処理
+                // 長い発話でもこの間隔で中間結果が得られ、応答遅延を大幅に削減する
+                // ただし処理が追いつかない場合 (バックプレッシャー検出時) は無効化し、
+                // 通常の無音/最大バッファ戦略に任せて過負荷を防ぐ
+                bool intermediateProcess = buffer.Length >= intermediateBytes
+                                        && !silenceDetected
+                                        && lastVoice != DateTime.MinValue
+                                        && silenceMs < SilenceTimeoutMs
+                                        && backpressure.ConsecutiveSlowChunks == 0;
+
                 // 通常: バッファ >= 最小長 かつ (無音検出 or 最大到達)
                 // エネルギーベースは追加の無音判定
                 bool normalProcess = buffer.Length >= minBytes && 
@@ -470,7 +496,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 bool shortUtterance = buffer.Length > 0 && buffer.Length < minBytes
                                    && lastVoice != DateTime.MinValue && silenceMs >= LongSilenceMs;
 
-                if (normalProcess || shortUtterance)
+                if (normalProcess || shortUtterance || intermediateProcess)
                 {
                     // ToArray のメモリ倍増を最小化: Position ベースで読み出す
                     int len = (int)buffer.Length;
@@ -645,7 +671,10 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 // キャッシュ済み WhisperProcessor を再利用 (prompt 変更時のみ再構築)
                 var processor = GetOrCreateProcessor(speaker, prompt);
 
-                using var wavStream = new MemoryStream();
+                // 話者ごとの MemoryStream を再利用 (毎回 new を回避)
+                bool isMic = speaker == "自分";
+                var wavStream = isMic ? _micWavStream : _spkWavStream;
+                wavStream.SetLength(0);
                 AudioProcessing.WriteWavPcm16(wavStream, pcm16, TargetFormat.SampleRate);
                 wavStream.Position = 0;
 
@@ -713,6 +742,9 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 lock (_lock)
                 {
                     _entries.Add(entry);
+                    _cachedEntries = null;
+                    _cachedMicEntries = null;
+                    _cachedSpkEntries = null;
                 }
 
                 OnTranscribed?.Invoke(entry);

@@ -264,11 +264,11 @@ internal sealed class RecordingBuffer : IDisposable
         int byteRate = sampleRate * channels * bitsPerSample / 8;
         int blockAlign = channels * bitsPerSample / 8;
 
-        w.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"));
+        w.Write("RIFF"u8);
         w.Write(36 + dataSize);
-        w.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"));
+        w.Write("WAVE"u8);
 
-        w.Write(System.Text.Encoding.ASCII.GetBytes("fmt "));
+        w.Write("fmt "u8);
         w.Write(16);
         w.Write((short)1);    // PCM
         w.Write((short)channels);
@@ -277,7 +277,7 @@ internal sealed class RecordingBuffer : IDisposable
         w.Write((short)blockAlign);
         w.Write((short)bitsPerSample);
 
-        w.Write(System.Text.Encoding.ASCII.GetBytes("data"));
+        w.Write("data"u8);
         w.Write(dataSize);
     }
 

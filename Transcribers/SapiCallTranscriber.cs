@@ -82,22 +82,27 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     private long _speakerWritten;
     private WaveFormat? _loopbackFormat;
 
+    // ── Entries キャッシュ (ToList() の毎回アロケーションを回避) ──
+    private IReadOnlyList<TranscriptEntry>? _cachedEntries;
+    private IReadOnlyList<TranscriptEntry>? _cachedMicEntries;
+    private IReadOnlyList<TranscriptEntry>? _cachedSpkEntries;
+
     /// <summary>認識済みの全エントリ (スレッドセーフなコピーを返す)</summary>
     public IReadOnlyList<TranscriptEntry> Entries
     {
-        get { lock (_lock) return _entries.ToList(); }
+        get { lock (_lock) { if (_cachedEntries == null) _cachedEntries = _entries.ToList(); return _cachedEntries; } }
     }
 
     /// <summary>マイク認識結果のみ</summary>
     public IReadOnlyList<TranscriptEntry> MicEntries
     {
-        get { lock (_lock) return _entries.Where(e => e.Speaker == "自分").ToList(); }
+        get { lock (_lock) { if (_cachedMicEntries == null) _cachedMicEntries = _entries.Where(e => e.Speaker == "自分").ToList(); return _cachedMicEntries; } }
     }
 
     /// <summary>スピーカー認識結果のみ</summary>
     public IReadOnlyList<TranscriptEntry> SpeakerEntries
     {
-        get { lock (_lock) return _entries.Where(e => e.Speaker == "相手").ToList(); }
+        get { lock (_lock) { if (_cachedSpkEntries == null) _cachedSpkEntries = _entries.Where(e => e.Speaker == "相手").ToList(); return _cachedSpkEntries; } }
     }
 
     public event Action<TranscriptEntry>? OnTranscribed;
@@ -352,6 +357,9 @@ public sealed class SapiCallTranscriber : ICallTranscriber
         lock (_lock)
         {
             _entries.Add(entry);
+            _cachedEntries = null;
+            _cachedMicEntries = null;
+            _cachedSpkEntries = null;
         }
 
         OnTranscribed?.Invoke(entry);

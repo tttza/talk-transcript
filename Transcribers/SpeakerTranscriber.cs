@@ -34,10 +34,13 @@ public sealed class SpeakerTranscriber : IDisposable
     /// <summary>認識エンジンが期待するフォーマット: 16 kHz / 16 bit / mono</summary>
     private static readonly WaveFormat TargetFormat = new(16000, 16, 1);
 
+    // ── Entries キャッシュ (ToList() の毎回アロケーションを回避) ──
+    private IReadOnlyList<TranscriptEntry>? _cachedEntries;
+
     /// <summary>認識済みの全エントリ (スレッドセーフなコピーを返す)</summary>
     public IReadOnlyList<TranscriptEntry> Entries
     {
-        get { lock (_lock) return _entries.ToList(); }
+        get { lock (_lock) { if (_cachedEntries == null) _cachedEntries = _entries.ToList(); return _cachedEntries; } }
     }
 
     /// <summary>認識結果が得られたときに発火するイベント</summary>
@@ -165,6 +168,7 @@ public sealed class SpeakerTranscriber : IDisposable
         lock (_lock)
         {
             _entries.Add(entry);
+            _cachedEntries = null;
         }
 
         OnTranscribed?.Invoke(entry);

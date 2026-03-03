@@ -52,6 +52,9 @@ public sealed class VoskCallTranscriber : ICallTranscriber
     /// <summary>キューサイズ上限 (16kHz/16bit/100ms ≒ 3.2KB × 200 ≒ 20秒分)</summary>
     private const int MaxQueueSize = 200;
 
+    // ── イベント駆動 (ポーリング回避) ──
+    private readonly ManualResetEventSlim _micDataSignal = new(false);
+    private readonly ManualResetEventSlim _spkDataSignal = new(false);
 
 
     // ── 統計 ──
@@ -65,19 +68,24 @@ public sealed class VoskCallTranscriber : ICallTranscriber
     /// <summary>認識エンジンが期待するフォーマット: 16 kHz / 16 bit / mono</summary>
     private static readonly WaveFormat TargetFormat = new(16000, 16, 1);
 
+    // ── Entries キャッシュ (ToList() の毎回アロケーションを回避) ──
+    private IReadOnlyList<TranscriptEntry>? _cachedEntries;
+    private IReadOnlyList<TranscriptEntry>? _cachedMicEntries;
+    private IReadOnlyList<TranscriptEntry>? _cachedSpkEntries;
+
     public IReadOnlyList<TranscriptEntry> Entries
     {
-        get { lock (_lock) return _entries.ToList(); }
+        get { lock (_lock) { if (_cachedEntries == null) _cachedEntries = _entries.ToList(); return _cachedEntries; } }
     }
 
     public IReadOnlyList<TranscriptEntry> MicEntries
     {
-        get { lock (_lock) return _entries.Where(e => e.Speaker == "自分").ToList(); }
+        get { lock (_lock) { if (_cachedMicEntries == null) _cachedMicEntries = _entries.Where(e => e.Speaker == "自分").ToList(); return _cachedMicEntries; } }
     }
 
     public IReadOnlyList<TranscriptEntry> SpeakerEntries
     {
-        get { lock (_lock) return _entries.Where(e => e.Speaker == "相手").ToList(); }
+        get { lock (_lock) { if (_cachedSpkEntries == null) _cachedSpkEntries = _entries.Where(e => e.Speaker == "相手").ToList(); return _cachedSpkEntries; } }
     }
 
     public event Action<TranscriptEntry>? OnTranscribed;
@@ -188,6 +196,7 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         Buffer.BlockCopy(e.Buffer, 0, copy, 0, e.BytesRecorded);
         while (_micQueue.Count > MaxQueueSize) _micQueue.TryDequeue(out _);
         _micQueue.Enqueue(copy);
+        _micDataSignal.Set(); // 処理スレッドを起床
     }
 
     // ────────────────────────────────────────────────
@@ -224,6 +233,7 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         // キューに追加 (コールバックを即座に返す)
         while (_spkQueue.Count > MaxQueueSize) _spkQueue.TryDequeue(out _);
         _spkQueue.Enqueue(converted);
+        _spkDataSignal.Set(); // 処理スレッドを起床
     }
 
     // ────────────────────────────────────────────────
@@ -242,7 +252,8 @@ public sealed class VoskCallTranscriber : ICallTranscriber
                 }
                 else
                 {
-                    Thread.Sleep(10);
+                    _micDataSignal.Wait(200); // イベント駆動: データ到着または 200ms で起床
+                    _micDataSignal.Reset();
                 }
             }
             // 停止時: キューに残ったデータを処理
@@ -271,9 +282,11 @@ public sealed class VoskCallTranscriber : ICallTranscriber
                 }
                 else
                 {
-                    Thread.Sleep(10);
+                    _spkDataSignal.Wait(200); // イベント駆動: データ到着または 200ms で起床
+                    _spkDataSignal.Reset();
                 }
             }
+            // 停止時: キューに残ったデータを処理
             while (_spkQueue.TryDequeue(out var remaining))
             {
                 if (_speakerRecognizer != null)
@@ -307,6 +320,9 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         lock (_lock)
         {
             _entries.Add(entry);
+            _cachedEntries = null;
+            _cachedMicEntries = null;
+            _cachedSpkEntries = null;
         }
 
         OnTranscribed?.Invoke(entry);
@@ -345,6 +361,10 @@ public sealed class VoskCallTranscriber : ICallTranscriber
     {
         if (_stopping || _disposed) return;
         _stopping = true;
+
+        // イベントシグナルを Set して処理スレッドを起床させる
+        _micDataSignal.Set();
+        _spkDataSignal.Set();
 
         try { _micCapture.StopRecording(); } catch { }
         try { _speakerCapture.StopRecording(); } catch { }
@@ -452,6 +472,10 @@ public sealed class VoskCallTranscriber : ICallTranscriber
         // Producer-Consumer キューをクリア
         while (_micQueue.TryDequeue(out _)) { }
         while (_spkQueue.TryDequeue(out _)) { }
+
+        // イベントシグナルを破棄
+        _micDataSignal.Dispose();
+        _spkDataSignal.Dispose();
 
         // 所有権がある場合のみ Model を破棄
         if (_ownsModel)

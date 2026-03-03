@@ -17,6 +17,7 @@ public static class AppLogger
 
     private static StreamWriter? _writer;
     private static readonly object _lock = new();
+    private static Timer? _flushTimer; // 定期フラッシュ (AutoFlush=false の代わり)
     private static LogLevel _minLevel = LogLevel.Info;
     private static bool _consoleOutput = false;
     private static readonly ConcurrentQueue<string> _recentErrors = new();
@@ -51,7 +52,7 @@ public static class AppLogger
 
             var newWriter = new StreamWriter(logFile, append: false, Encoding.UTF8)
             {
-                AutoFlush = true
+                AutoFlush = false // 定期フラッシュで I/O コストを削減
             };
             newWriter.WriteLine($"=== TalkTranscript ログ開始 {DateTime.Now:yyyy/MM/dd HH:mm:ss} ===");
             newWriter.WriteLine($"OS: {Environment.OSVersion}");
@@ -62,6 +63,16 @@ public static class AppLogger
             {
                 _writer = newWriter;
             }
+
+            // 5秒間隔で定期フラッシュ (AutoFlush=false の代わり)
+            _flushTimer?.Dispose();
+            _flushTimer = new Timer(_ =>
+            {
+                lock (_lock)
+                {
+                    try { _writer?.Flush(); } catch { }
+                }
+            }, null, 5000, 5000);
 
             // 古いログを削除 (7日以上前)
             CleanOldLogs();
@@ -115,6 +126,9 @@ public static class AppLogger
     /// <summary>ログファイルを閉じる</summary>
     public static void Close()
     {
+        _flushTimer?.Dispose();
+        _flushTimer = null;
+
         lock (_lock)
         {
             _writer?.WriteLine();

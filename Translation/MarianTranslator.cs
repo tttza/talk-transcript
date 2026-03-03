@@ -28,6 +28,7 @@ public sealed class MarianTranslator : ITranslator
     private readonly List<string> _spmPieces;               // SPM ピース文字列
     private readonly List<float> _spmScores;                // SPM ピーススコア (log-prob)
     private readonly Dictionary<string, int> _pieceToModelId; // SPM ピース → model id
+    private readonly Dictionary<string, (int spmIdx, float score)> _pieceLookup; // キャッシュ済みルックアップ
 
     private readonly int _eosId;
     private readonly int _unkId;
@@ -96,6 +97,11 @@ public sealed class MarianTranslator : ITranslator
                 _pieceToModelId.TryAdd(_spmPieces[i], modelId);
         }
         AppLogger.Debug($"SPM pieces mapped to vocab: {_pieceToModelId.Count}/{_spmPieces.Count}");
+
+        // ── SPM ピースルックアップをキャッシュ (翻訳ごとの再構築を回避) ──
+        _pieceLookup = new Dictionary<string, (int spmIdx, float score)>();
+        for (int i = 3; i < _spmPieces.Count; i++)
+            _pieceLookup.TryAdd(_spmPieces[i], (i, _spmScores[i]));
 
         // ── ONNX Session の初期化 ──
         _sessionOptions = CreateSessionOptions(useGpu, out bool gpuActivated);
@@ -362,10 +368,7 @@ public sealed class MarianTranslator : ITranslator
         Array.Fill(bestScore, float.NegativeInfinity);
         bestScore[0] = 0;
 
-        // SPM ピースルックアップ (特殊トークンをスキップ)
-        var pieceLookup = new Dictionary<string, (int spmIdx, float score)>();
-        for (int i = 3; i < _spmPieces.Count; i++) // 0=<unk>, 1=<s>, 2=</s> はスキップ
-            pieceLookup.TryAdd(_spmPieces[i], (i, _spmScores[i]));
+        // キャッシュ済み pieceLookup を使用 (翻訳ごとの再構築を回避)
 
         for (int end = 1; end <= n; end++)
         {
@@ -377,7 +380,7 @@ public sealed class MarianTranslator : ITranslator
                 ReadOnlySpan<char> subSpan = inputSpan.Slice(start, len);
                 // Dictionary 検索には string が必要なため、短いピースのみ文字列化
                 string sub = subSpan.ToString();
-                if (pieceLookup.TryGetValue(sub, out var entry)
+                if (_pieceLookup.TryGetValue(sub, out var entry)
                     && _pieceToModelId.TryGetValue(sub, out int modelId))
                 {
                     float newScore = bestScore[start] + entry.score;

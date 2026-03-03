@@ -32,10 +32,13 @@ public sealed class MicTranscriber : IDisposable
     /// <summary>認識エンジンが期待するフォーマット: 16 kHz / 16 bit / mono</summary>
     private static readonly WaveFormat TargetFormat = new(16000, 16, 1);
 
+    // ── Entries キャッシュ (ToList() の毎回アロケーションを回避) ──
+    private IReadOnlyList<TranscriptEntry>? _cachedEntries;
+
     /// <summary>認識済みの全エントリ (スレッドセーフなコピーを返す)</summary>
     public IReadOnlyList<TranscriptEntry> Entries
     {
-        get { lock (_lock) return _entries.ToList(); }
+        get { lock (_lock) { if (_cachedEntries == null) _cachedEntries = _entries.ToList(); return _cachedEntries; } }
     }
 
     /// <summary>認識結果が得られたときに発火するイベント</summary>
@@ -129,14 +132,8 @@ public sealed class MicTranscriber : IDisposable
         // 最初の数チャンクの音量をログ出力
         if (_dataChunksReceived <= 3 || _dataChunksReceived % 100 == 0)
         {
-            short maxSample = 0;
-            for (int j = 0; j + 1 < e.BytesRecorded; j += 2)
-            {
-                short s = BitConverter.ToInt16(e.Buffer, j);
-                int abs = Math.Abs((int)s); // short.MinValue (-32768) でも安全
-                if (abs > maxSample) maxSample = (short)Math.Min(abs, short.MaxValue);
-            }
-            Console.WriteLine($"[マイク] chunk#{_dataChunksReceived}: {e.BytesRecorded} bytes, ピーク={maxSample}");
+            short peak = AudioProcessing.CalcPeak(e.Buffer, e.BytesRecorded);
+            Console.WriteLine($"[マイク] chunk#{_dataChunksReceived}: {e.BytesRecorded} bytes, ピーク={peak}");
         }
 
         // データが実際に流れ始めてから認識エンジンを開始
@@ -165,6 +162,7 @@ public sealed class MicTranscriber : IDisposable
         lock (_lock)
         {
             _entries.Add(entry);
+            _cachedEntries = null;
         }
 
         OnTranscribed?.Invoke(entry);

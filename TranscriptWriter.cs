@@ -12,6 +12,7 @@ public sealed class TranscriptWriter : IDisposable
     private readonly string _filePath;
     private readonly StreamWriter _writer;
     private readonly object _writeLock = new();
+    private readonly Timer _flushTimer; // 定期フラッシュ (毎回 AutoFlush の代わりに 5 秒間隔)
     private string? _lastSpeaker;
     private int _selfCount;
     private int _otherCount;
@@ -33,8 +34,18 @@ public sealed class TranscriptWriter : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
         _writer = new StreamWriter(filePath, append: false, Encoding.UTF8)
         {
-            AutoFlush = true  // 各行を即座にディスクへ
+            AutoFlush = false  // 定期フラッシュで I/O コストを削減
         };
+
+        // 5秒間隔で定期フラッシュ
+        _flushTimer = new Timer(_ =>
+        {
+            lock (_writeLock)
+            {
+                if (!_closed && !_disposed)
+                    try { _writer.Flush(); } catch { }
+            }
+        }, null, 5000, 5000);
 
         // ── ヘッダー ──
         _writer.WriteLine($"通話記録 - {DateTime.Now:yyyy/MM/dd HH:mm}");
@@ -131,6 +142,7 @@ public sealed class TranscriptWriter : IDisposable
         if (_disposed) return;
         try { Close(); } catch { /* Dispose 中の例外は無視 */ }
         _disposed = true;
+        _flushTimer.Dispose();
         _writer.Dispose();
     }
 }

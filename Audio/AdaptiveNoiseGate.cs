@@ -17,6 +17,7 @@ internal sealed class AdaptiveNoiseGate
     private readonly float _minThreshold;
     private readonly float _maxThreshold;
     private readonly float _multiplier;
+    private float[] _sortBuffer; // ソート用バッファ (毎回の ToArray() アロケーションを回避)
 
     private float _currentThreshold;
     private float _noiseFloor;
@@ -45,6 +46,7 @@ internal sealed class AdaptiveNoiseGate
         _maxThreshold = maxThreshold;
         _currentThreshold = initialThreshold;
         _noiseFloor = initialThreshold / multiplier;
+        _sortBuffer = new float[historySize];
     }
 
     /// <summary>
@@ -62,11 +64,14 @@ internal sealed class AdaptiveNoiseGate
         if (_rmsHistory.Count < 5) return;
 
         // ノイズフロア = 下位25%の中央値 (外れ値に頑健)
-        // LINQ ソートの代わりに配列コピー+Array.Sort で GC 圧力を削減
-        var sorted = _rmsHistory.ToArray();
-        Array.Sort(sorted);
-        int q1Index = sorted.Length / 4;
-        _noiseFloor = sorted[Math.Max(0, q1Index)];
+        // 事前確保のバッファを再利用し ToArray() のアロケーションを回避
+        int count = _rmsHistory.Count;
+        if (_sortBuffer.Length < count)
+            _sortBuffer = new float[_historySize];
+        _rmsHistory.CopyTo(_sortBuffer, 0);
+        Array.Sort(_sortBuffer, 0, count);
+        int q1Index = count / 4;
+        _noiseFloor = _sortBuffer[Math.Max(0, q1Index)];
 
         // 閾値 = ノイズフロア × 倍率 (範囲制限)
         _currentThreshold = Math.Clamp(_noiseFloor * _multiplier, _minThreshold, _maxThreshold);

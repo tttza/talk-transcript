@@ -29,8 +29,12 @@ public sealed class TranslationWorker : IDisposable
     /// <summary>文が未完の場合のタイムアウト倍率 (通常マージウィンドウの N 倍)</summary>
     private const int IncompleteSentenceTimeoutMultiplier = 8;
 
-    /// <summary>未完文待機の最低保証時間 (ms)。Whisper の処理が長い場合に対応。</summary>
-    private const int MinIncompleteSentenceTimeoutMs = 10_000;
+    /// <summary>
+    /// 未完文待機の最低保証時間 (ms)。
+    /// インターバル処理 (5秒) + Whisper 推論時間を考慮し、
+    /// 次のフラグメントが到着するまで十分な待ち時間を確保する。
+    /// </summary>
+    private const int MinIncompleteSentenceTimeoutMs = 20_000;
 
     /// <summary>翻訳完了時に呼ばれるイベント (翻訳済み TranscriptEntry を引数に取る)</summary>
     public event Action<TranscriptEntry>? OnTranslated;
