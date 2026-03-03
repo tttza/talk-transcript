@@ -57,7 +57,11 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     private volatile bool _engineInSpeech;
 
     /// <summary>SpeechDetected 時点でのアクティブソース (認識結果の話者判定に使用)</summary>
-    private volatile bool _speechDetectedMicActive = true;
+    /// <remarks>連続発話での上書きを防ぐためキューで管理する</remarks>
+    private readonly System.Collections.Concurrent.ConcurrentQueue<bool> _speechDetectedQueue = new();
+
+    /// <summary>ソース切替のロック</summary>
+    private readonly object _sourceSwitchLock = new();
 
     private volatile bool _stopping;
 
@@ -324,16 +328,17 @@ public sealed class SapiCallTranscriber : ICallTranscriber
 
     private void OnSpeechDetected(object? sender, SpeechDetectedEventArgs e)
     {
-        // 音声検出時点のソースを記録し、認識完了まで保持する
-        _speechDetectedMicActive = _micActive;
-        string src = _speechDetectedMicActive ? "自分" : "相手";
+        // 音声検出時点のソースをキューに記録し、認識完了まで 1:1 で対応付ける
+        _speechDetectedQueue.Enqueue(_micActive);
+        string src = _micActive ? "自分" : "相手";
         Console.WriteLine($"[通話] 音声検出 ({src}, position: {e.AudioPosition})");
     }
 
     private void OnSpeechRecognized(object? sender, SpeechRecognizedEventArgs e)
     {
-        // SpeechDetected 時点で記録したソースを使う (認識中のソース切替による誤判定を防止)
-        string speaker = _speechDetectedMicActive ? "自分" : "相手";
+        // SpeechDetected 時点でキューに記録したソースを使う (連続発話での上書きを防止)
+        bool detectedMicActive = _speechDetectedQueue.TryDequeue(out bool queued) ? queued : _micActive;
+        string speaker = detectedMicActive ? "自分" : "相手";
         Console.WriteLine($"[通話] 認識 ({speaker}): ({e.Result.Text.Length}文字) (信頼度: {e.Result.Confidence:F2})");
 
         if (e.Result.Confidence < 0.1f) return;

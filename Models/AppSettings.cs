@@ -120,7 +120,6 @@ public class AppSettings
             var dir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 "TalkTranscript");
-            Directory.CreateDirectory(dir);
             return Path.Combine(dir, "settings.json");
         }
     }
@@ -150,6 +149,8 @@ public class AppSettings
     {
         try
         {
+            var dir = Path.GetDirectoryName(FilePath);
+            if (dir != null) Directory.CreateDirectory(dir);
             var json = JsonSerializer.Serialize(this, JsonOptions);
             File.WriteAllText(FilePath, json);
         }

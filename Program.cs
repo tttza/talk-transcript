@@ -255,6 +255,7 @@ string jsonPath = Path.Combine(outputDir, baseName + ".json");
 IncrementalJsonWriter? jsonWriter = outputJson ? new IncrementalJsonWriter(jsonPath) : null;
 
 var overallStart = DateTime.Now;
+var firstSessionStart = DateTime.Now; // 全セッション通しの開始時刻 (サマリー用)
 int totalMicCount = 0;
 int totalSpkCount = 0;
 var allEntries = new System.Collections.Concurrent.ConcurrentDictionary<int, TranscriptEntry>(); // 全セッションのエントリを蓄積 (エクスポート用・スレッドセーフ)
@@ -644,12 +645,20 @@ while (!quit)
             // デバイス再読み込み
             try
             {
-                (micDevice, speakerDevice) = DeviceSelector.LoadSavedDevices(settings);
+                var (newMic, newSpk) = DeviceSelector.LoadSavedDevices(settings);
+                micDevice.Dispose();
+                speakerDevice.Dispose();
+                micDevice = newMic;
+                speakerDevice = newSpk;
             }
             catch
             {
                 Console.WriteLine("前回のデバイスが見つかりません。選択してください。");
-                (micDevice, speakerDevice) = DeviceSelector.SelectDevices(settings);
+                var (newMic, newSpk) = DeviceSelector.SelectDevices(settings);
+                micDevice.Dispose();
+                speakerDevice.Dispose();
+                micDevice = newMic;
+                speakerDevice = newSpk;
             }
             // 翻訳エンジン再初期化 (設定変更を反映)
             await InitTranslationAsync();
@@ -662,6 +671,14 @@ while (!quit)
 }
 
 // ── 最終出力 ──
+// EmergencyCleanup との競合を防止 (ProcessExit が別スレッドで発火する可能性)
+if (Interlocked.Exchange(ref _cleanedUp, 1) != 0)
+{
+    // 既に EmergencyCleanup が実行済み — 二重 Dispose を回避
+    AppLogger.Close();
+    return;
+}
+
 // 翻訳ワーカーを停止 (残りのキューを処理完了後)
 translationWorker?.Stop();
 translationWorker?.Dispose();
@@ -679,7 +696,7 @@ if (jsonWriter != null)
     AnsiConsole.MarkupLine($"  [green]✓[/] JSON 出力: [white]{Markup.Escape(jsonPath)}[/]");
 }
 
-SpectreUI.PrintSummary(outputText ? textPath : null, totalMicCount, totalSpkCount, DateTime.Now - overallStart);
+SpectreUI.PrintSummary(outputText ? textPath : null, totalMicCount, totalSpkCount, DateTime.Now - firstSessionStart);
 
 // ── 追加フォーマットでエクスポート (#1) ──
 // JSON は IncrementalJsonWriter で既に出力済みなので除外
@@ -745,11 +762,23 @@ void RunPostProcessing(ICallTranscriber transcriber, string? whisperSize,
             {
                 if (w != null)
                 {
-                    w.Close();
-                    w.Dispose();
-                    using var ww = new TranscriptWriter(fp);
-                    foreach (var entry in whisperEntries) ww.Append(entry);
-                    ww.Close();
+                    // 呼び出し元の writer を閉じずに、一時ファイルに後処理結果を書き出してからリネーム
+                    string tempPath = fp + ".whisper.tmp";
+                    try
+                    {
+                        using (var ww = new TranscriptWriter(tempPath))
+                        {
+                            foreach (var entry in whisperEntries) ww.Append(entry);
+                            ww.Close();
+                        }
+                        w.Close();
+                        File.Move(tempPath, fp, overwrite: true);
+                    }
+                    catch
+                    {
+                        try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+                        throw;
+                    }
                 }
                 AnsiConsole.MarkupLine("  [green]Whisper 後処理で更新しました。[/]");
                 return;

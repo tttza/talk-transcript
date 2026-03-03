@@ -53,8 +53,8 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     private Thread? _spkProcessThread;
 
     // ── VAD (音声区間検出) ──
-    private DateTime _micLastVoiceTime = DateTime.MinValue;
-    private DateTime _spkLastVoiceTime = DateTime.MinValue;
+    private long _micLastVoiceTicks = DateTime.MinValue.Ticks;
+    private long _spkLastVoiceTicks = DateTime.MinValue.Ticks;
 
     // ── VAD エネルギー履歴 (スライディングウィンドウ) ──
     private readonly Queue<float> _micEnergyHistory = new();
@@ -267,7 +267,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         if (!micIsVoice) return;
 
         // VAD: 音声がある時刻を記録
-        _micLastVoiceTime = DateTime.UtcNow;
+        Interlocked.Exchange(ref _micLastVoiceTicks, DateTime.UtcNow.Ticks);
 
         // 認識用バッファに追加 (バックプレッシャー: 上限超過時は古いデータを破棄)
         lock (_micBufLock)
@@ -331,7 +331,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         if (!spkIsVoice) return;
 
         // VAD: 音声がある時刻を記録
-        _spkLastVoiceTime = DateTime.UtcNow;
+        Interlocked.Exchange(ref _spkLastVoiceTicks, DateTime.UtcNow.Ticks);
 
         // 認識用バッファに追加 (バックプレッシャー: 上限超過時は古いデータを破棄)
         lock (_spkBufLock)
@@ -358,12 +358,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     //  VAD ベース認識処理ループ (バックグラウンドスレッド)
     // ────────────────────────────────────────────────
     private void MicProcessLoop() => VadProcessLoop("自分", _micBufLock, _micBuffer,
-        () => _micLastVoiceTime, () => _micLastPrompt, p => _micLastPrompt = p,
+        () => new DateTime(Interlocked.Read(ref _micLastVoiceTicks)), () => _micLastPrompt, p => _micLastPrompt = p,
         () => _micLastText, t => _micLastText = t, _micEnergyHistory, _micBackpressure,
         () => _micOverlap, o => _micOverlap = o);
 
     private void SpkProcessLoop() => VadProcessLoop("相手", _spkBufLock, _speakerBuffer,
-        () => _spkLastVoiceTime, () => _spkLastPrompt, p => _spkLastPrompt = p,
+        () => new DateTime(Interlocked.Read(ref _spkLastVoiceTicks)), () => _spkLastPrompt, p => _spkLastPrompt = p,
         () => _spkLastText, t => _spkLastText = t, _spkEnergyHistory, _spkBackpressure,
         () => _spkOverlap, o => _spkOverlap = o);
 

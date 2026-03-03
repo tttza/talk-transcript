@@ -42,14 +42,26 @@ public static class AppLogger
         {
             Directory.CreateDirectory(LogDir);
             var logFile = Path.Combine(LogDir, $"app_{DateTime.Now:yyyyMMdd_HHmmss}.log");
-            _writer = new StreamWriter(logFile, append: false, Encoding.UTF8)
+
+            // 既存のライターを閉じる (2回目以降の呼び出しでリークを防止)
+            lock (_lock)
+            {
+                _writer?.Dispose();
+            }
+
+            var newWriter = new StreamWriter(logFile, append: false, Encoding.UTF8)
             {
                 AutoFlush = true
             };
-            _writer.WriteLine($"=== TalkTranscript ログ開始 {DateTime.Now:yyyy/MM/dd HH:mm:ss} ===");
-            _writer.WriteLine($"OS: {Environment.OSVersion}");
-            _writer.WriteLine($".NET: {Environment.Version}");
-            _writer.WriteLine();
+            newWriter.WriteLine($"=== TalkTranscript ログ開始 {DateTime.Now:yyyy/MM/dd HH:mm:ss} ===");
+            newWriter.WriteLine($"OS: {Environment.OSVersion}");
+            newWriter.WriteLine($".NET: {Environment.Version}");
+            newWriter.WriteLine();
+
+            lock (_lock)
+            {
+                _writer = newWriter;
+            }
 
             // 古いログを削除 (7日以上前)
             CleanOldLogs();
@@ -72,7 +84,7 @@ public static class AppLogger
         while (_recentErrors.Count > MaxRecentErrors)
             _recentErrors.TryDequeue(out _);
 
-        OnError?.Invoke(full);
+        try { OnError?.Invoke(full); } catch { /* イベントハンドラの例外が呼び出し元に伝播しないようにする */ }
     }
 
     private static void Log(LogLevel level, string message)

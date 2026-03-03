@@ -24,7 +24,7 @@ internal static class MemoryHelper
     private const long AbsoluteMaxBufferBytes = 500L * 1024 * 1024;
 
     /// <summary>ログ出力の抑制用 (同じ警告を短時間に連発しない)</summary>
-    private static DateTime _lastWarnTime = DateTime.MinValue;
+    private static long _lastWarnTicks = 0;
 
     // ── Win32 API ──
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
@@ -134,8 +134,9 @@ internal static class MemoryHelper
 
     private static void WarnMemoryLow(long availableBytes, long reducedBytes)
     {
-        if ((DateTime.UtcNow - _lastWarnTime).TotalSeconds < 30) return;
-        _lastWarnTime = DateTime.UtcNow;
+        long nowTicks = Environment.TickCount64;
+        if (nowTicks - Interlocked.Read(ref _lastWarnTicks) < 30_000) return;
+        Interlocked.Exchange(ref _lastWarnTicks, nowTicks);
 
         long availMB = availableBytes / (1024 * 1024);
         long reducedKB = reducedBytes / 1024;

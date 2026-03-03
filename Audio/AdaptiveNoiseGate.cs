@@ -62,7 +62,9 @@ internal sealed class AdaptiveNoiseGate
         if (_rmsHistory.Count < 5) return;
 
         // ノイズフロア = 下位25%の中央値 (外れ値に頑健)
-        var sorted = _rmsHistory.OrderBy(x => x).ToArray();
+        // LINQ ソートの代わりに配列コピー+Array.Sort で GC 圧力を削減
+        var sorted = _rmsHistory.ToArray();
+        Array.Sort(sorted);
         int q1Index = sorted.Length / 4;
         _noiseFloor = sorted[Math.Max(0, q1Index)];
 

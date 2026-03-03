@@ -25,6 +25,8 @@ internal static class DeviceHelper
             var caps = WaveInEvent.GetCapabilities(i);
             string prodName = caps.ProductName;
 
+            if (string.IsNullOrEmpty(prodName)) continue;
+
             if (targetName.StartsWith(prodName, StringComparison.OrdinalIgnoreCase) ||
                 prodName.StartsWith(targetName[..Math.Min(targetName.Length, prodName.Length)],
                                     StringComparison.OrdinalIgnoreCase))

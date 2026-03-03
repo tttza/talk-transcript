@@ -90,15 +90,17 @@ public sealed class IncrementalJsonWriter : IDisposable
             _writer.Flush();
             _writer.Dispose();
 
-            // 完全な JSON 形式で上書き (メタデータ付き)
+            // 完全な JSON 形式で一時ファイルに書き出し、成功後にアトミックに置換
+            string tempPath = _filePath + ".tmp";
             try
             {
-                JsonTranscriptWriter.Write(_filePath, allEntries, sessionStart, duration, engine, language);
+                JsonTranscriptWriter.Write(tempPath, allEntries, sessionStart, duration, engine, language);
+                File.Move(tempPath, _filePath, overwrite: true);
             }
             catch
             {
                 // 完全な JSON への変換に失敗した場合、NDJSON 中間ファイルをそのまま残す
-                // (クラッシュリカバリ用に十分な情報は保持されている)
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
             }
         }
     }

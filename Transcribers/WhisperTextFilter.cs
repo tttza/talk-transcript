@@ -52,7 +52,7 @@ internal static class WhisperTextFilter
     /// 例: "はい はい はい はい" → 3回以上繰り返しは異常
     /// </summary>
     private static readonly Regex RepetitionPattern =
-        new(@"(.{2,15}?)\1{2,}", RegexOptions.Compiled);
+        new(@"(.{2,15?})\1{2,}", RegexOptions.Compiled, TimeSpan.FromMilliseconds(100));
 
     /// <summary>
     /// テキストがハルシネーションかどうかを判定する。

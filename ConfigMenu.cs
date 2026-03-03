@@ -660,6 +660,7 @@ internal static class ConfigMenu
             settings.SpeakerDeviceId = fresh.SpeakerDeviceId;
             settings.SpeakerDeviceName = fresh.SpeakerDeviceName;
             settings.SaveRecording = fresh.SaveRecording;
+            settings.SaveMicOnly = fresh.SaveMicOnly;
             settings.MaxCpuThreads = fresh.MaxCpuThreads;
             settings.ProcessPriority = fresh.ProcessPriority;
             settings.EnableTranslation = fresh.EnableTranslation;

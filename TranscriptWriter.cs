@@ -11,6 +11,7 @@ public sealed class TranscriptWriter : IDisposable
 {
     private readonly string _filePath;
     private readonly StreamWriter _writer;
+    private readonly object _writeLock = new();
     private string? _lastSpeaker;
     private int _selfCount;
     private int _otherCount;
@@ -48,7 +49,7 @@ public sealed class TranscriptWriter : IDisposable
     {
         if (_closed || _disposed) return;
 
-        lock (_writer)
+        lock (_writeLock)
         {
             if (_closed || _disposed) return; // ロック取得後に再チェック (ダブルチェックロック)
 
@@ -90,7 +91,7 @@ public sealed class TranscriptWriter : IDisposable
         if (_closed || _disposed) return;
         if (string.IsNullOrEmpty(entry.TranslatedText)) return;
 
-        lock (_writer)
+        lock (_writeLock)
         {
             if (_closed || _disposed) return;
             _writer.WriteLine($"  [{entry.Timestamp:HH:mm:ss}] → {entry.TranslatedText}");
@@ -104,7 +105,7 @@ public sealed class TranscriptWriter : IDisposable
     {
         if (_disposed) return;
 
-        lock (_writer)
+        lock (_writeLock)
         {
             if (_closed) return;
             _closed = true;

@@ -17,12 +17,28 @@ public static class SrtWriter
         using var writer = new StreamWriter(filePath, false, Encoding.UTF8);
 
         int seq = 1;
-        foreach (var entry in entries)
+        for (int i = 0; i < entries.Count; i++)
         {
+            var entry = entries[i];
             if (entry.IsBookmark) continue; // ブックマークは SRT に含めない
 
             var start = entry.Timestamp - sessionStart;
-            var end = start + (entry.Duration ?? TimeSpan.FromSeconds(3));
+            var defaultEnd = start + (entry.Duration ?? TimeSpan.FromSeconds(3));
+
+            // 次のエントリとの重複を防止
+            TimeSpan end = defaultEnd;
+            if (entry.Duration == null)
+            {
+                // Duration が不明な場合、次の非ブックマークエントリの開始時刻を上限とする
+                for (int j = i + 1; j < entries.Count; j++)
+                {
+                    if (entries[j].IsBookmark) continue;
+                    var nextStart = entries[j].Timestamp - sessionStart;
+                    if (nextStart > start && nextStart < end)
+                        end = nextStart;
+                    break;
+                }
+            }
 
             // 負のタイムスタンプを補正
             if (start < TimeSpan.Zero) start = TimeSpan.Zero;

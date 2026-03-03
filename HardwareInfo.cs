@@ -211,7 +211,7 @@ internal static class HardwareInfo
         if (n.Contains("4070 TI")) return 12288;
         if (n.Contains("4070 SUPER")) return 12288;
         if (n.Contains("4070")) return 12288;
-        if (n.Contains("4060 TI")) return 16384; // 16GB variant
+        if (n.Contains("4060 TI")) return 8192; // 8GB が標準 (16GB 版は少数派)
         if (n.Contains("4060")) return 8192;
         // RTX 30 series
         if (n.Contains("3090")) return 24576;

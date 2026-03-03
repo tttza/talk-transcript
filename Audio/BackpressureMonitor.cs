@@ -16,11 +16,23 @@ internal sealed class BackpressureMonitor
     private int _consecutiveSlowChunks;
     private long _totalDroppedBytes;
 
+    // double はアトミック保証がないため long (ビット変換) + Interlocked で管理
+    private long _currentMinBufferSecBits;
+    private long _currentMaxBufferSecBits;
+
     /// <summary>現在の最小バッファ秒数 (遅延時は引き上げる)</summary>
-    public double CurrentMinBufferSec { get; private set; }
+    public double CurrentMinBufferSec
+    {
+        get => BitConverter.Int64BitsToDouble(Interlocked.Read(ref _currentMinBufferSecBits));
+        private set => Interlocked.Exchange(ref _currentMinBufferSecBits, BitConverter.DoubleToInt64Bits(value));
+    }
 
     /// <summary>現在の最大バッファ秒数 (遅延時は引き上げる)</summary>
-    public double CurrentMaxBufferSec { get; private set; }
+    public double CurrentMaxBufferSec
+    {
+        get => BitConverter.Int64BitsToDouble(Interlocked.Read(ref _currentMaxBufferSecBits));
+        private set => Interlocked.Exchange(ref _currentMaxBufferSecBits, BitConverter.DoubleToInt64Bits(value));
+    }
 
     /// <summary>連続して処理が遅延しているチャンク数</summary>
     public int ConsecutiveSlowChunks => _consecutiveSlowChunks;

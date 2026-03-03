@@ -75,9 +75,10 @@ internal sealed class RecordingBuffer : IDisposable
     /// </summary>
     public void Write(byte[] buffer, int offset, int count)
     {
-        if (_chunks == null || _disposed) return;
+        if (_chunks == null) return;
         lock (_lock)
         {
+            if (_disposed) return;
             int remaining = count;
             int srcOffset = offset;
 
