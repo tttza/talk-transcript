@@ -481,13 +481,13 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
                 // 発話中インターバル処理: 無音を待たずに一定間隔でチャンクを処理
                 // 長い発話でもこの間隔で中間結果が得られ、応答遅延を大幅に削減する
-                // ただし処理が追いつかない場合 (バックプレッシャー検出時) は無効化し、
-                // 通常の無音/最大バッファ戦略に任せて過負荷を防ぐ
+                // 日本語など推論が重い言語でも軽度の遅延 (連続2チャンクまで) なら
+                // インターバル処理を維持し、深刻な遅延時のみ無効化する
                 bool intermediateProcess = buffer.Length >= intermediateBytes
                                         && !silenceDetected
                                         && lastVoice != DateTime.MinValue
                                         && silenceMs < SilenceTimeoutMs
-                                        && backpressure.ConsecutiveSlowChunks == 0;
+                                        && backpressure.ConsecutiveSlowChunks <= 2;
 
                 // 通常: バッファ >= 最小長 かつ (無音検出 or 最大到達)
                 // エネルギーベースは追加の無音判定
