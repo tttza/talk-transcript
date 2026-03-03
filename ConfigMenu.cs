@@ -715,18 +715,6 @@ internal static class ConfigMenu
             // GPU
             settings.TranslationUseGpu = AnsiConsole.Confirm("  翻訳で GPU を使用しますか?", settings.TranslationUseGpu);
 
-            // マージウィンドウ
-            var mergeChoice = AnsiConsole.Prompt(
-                new SelectionPrompt<string>()
-                    .Title("[cyan]  マージウィンドウ (断片化対策):[/]")
-                    .HighlightStyle(Style.Parse("bold cyan"))
-                    .AddChoices(
-                        "0 — 無効 (即時翻訳)",
-                        "1000 — 1秒 (短い待機)",
-                        "1500 — 1.5秒 (推奨)",
-                        "2000 — 2秒 (長めの待機)",
-                        "3000 — 3秒 (長い発話向け)"));
-            settings.TranslationMergeWindowMs = int.Parse(mergeChoice.Split(' ')[0]);
 
             // 言語ペアの有効性を確認
             string effectiveSrc = !string.IsNullOrEmpty(settings.Language) && settings.Language != "auto"
@@ -754,9 +742,7 @@ internal static class ConfigMenu
                     AnsiConsole.MarkupLine($"    [dim]{key}: {desc}[/]");
             }
 
-            string mergeInfo = settings.TranslationMergeWindowMs > 0
-                ? $", マージ:{settings.TranslationMergeWindowMs}ms" : "";
-            PrintSaved("翻訳", $"{effectiveSrc}→{effectiveTgt} (対象:{settings.TranslationTarget}, {(settings.TranslationUseGpu ? "GPU" : "CPU")}{mergeInfo})");
+            PrintSaved("翻訳", $"{effectiveSrc}→{effectiveTgt} (対象:{settings.TranslationTarget}, {(settings.TranslationUseGpu ? "GPU" : "CPU")})");
         }
         else
         {
@@ -937,7 +923,6 @@ internal static class ConfigMenu
             settings.TranslationTargetLang = fresh.TranslationTargetLang;
             settings.TranslationTarget = fresh.TranslationTarget;
             settings.TranslationUseGpu = fresh.TranslationUseGpu;
-            settings.TranslationMergeWindowMs = fresh.TranslationMergeWindowMs;
             settings.GpuBackendName = fresh.GpuBackendName;
             settings.AudioBoostEnabled = fresh.AudioBoostEnabled;
             settings.AudioBoostMaxGain = fresh.AudioBoostMaxGain;

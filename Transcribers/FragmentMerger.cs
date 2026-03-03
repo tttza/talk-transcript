@@ -20,21 +20,26 @@ public sealed class FragmentMerger : IDisposable
 {
     private readonly BlockingCollection<TranscriptEntry> _queue = new(128);
     private readonly Thread _workerThread;
-    private readonly int _mergeWindowMs;
     private volatile bool _stopping;
     private bool _disposed;
 
     /// <summary>マージバッファに蓄積する最大エントリ数</summary>
     private const int MaxMergeCount = 10;
 
-    /// <summary>文が未完の場合のタイムアウト倍率</summary>
-    private const int IncompleteSentenceTimeoutMultiplier = 8;
-
     /// <summary>
-    /// 未完文待機の最低保証時間 (ms)。
+    /// 未完文待機タイムアウト (ms)。
     /// インターバル処理 (3秒) + Whisper 推論時間を考慮。
+    /// 文が途中で終わっている場合に次のフラグメントを待つ最大時間。
     /// </summary>
     private const int MinIncompleteSentenceTimeoutMs = 20_000;
+
+    /// <summary>
+    /// 完結文フラッシュタイムアウト (ms)。
+    /// 文末記号で終わっているバッファを、次のフラグメントが来なかった場合に
+    /// フラッシュするまでの待機時間。通常は文末検出で即時フラッシュされるため
+    /// 安全策として機能する。
+    /// </summary>
+    private const int DefaultFlushTimeoutMs = 1_500;
 
     /// <summary>
     /// 複数フラグメントが逐次結合されたときに発火されるイベント。
@@ -53,14 +58,8 @@ public sealed class FragmentMerger : IDisposable
     /// <summary>
     /// フラグメント結合ワーカーを初期化して開始する。
     /// </summary>
-    /// <param name="mergeWindowMs">
-    /// マージウィンドウ (ミリ秒)。同一話者の連続フラグメントをこの時間内に
-    /// バッファリングし結合する。
-    /// </param>
-    public FragmentMerger(int mergeWindowMs = 1500)
+    public FragmentMerger()
     {
-        _mergeWindowMs = Math.Max(100, mergeWindowMs);
-
         _workerThread = new Thread(WorkerLoop)
         {
             Name = "FragmentMerger",
@@ -69,7 +68,7 @@ public sealed class FragmentMerger : IDisposable
         };
         _workerThread.Start();
 
-        AppLogger.Info($"FragmentMerger 開始 (マージ: {_mergeWindowMs}ms)");
+        AppLogger.Info("FragmentMerger 開始");
     }
 
     /// <summary>結合キューにエントリを投入する (スレッドセーフ)</summary>
@@ -127,9 +126,8 @@ public sealed class FragmentMerger : IDisposable
                         string checkText = _runningMerged?.Text ?? buffer[^1].Text;
                         bool incomplete = !EndsWithSentenceBoundary(checkText);
                         timeout = incomplete
-                            ? Math.Max(_mergeWindowMs * IncompleteSentenceTimeoutMultiplier,
-                                       MinIncompleteSentenceTimeoutMs)
-                            : _mergeWindowMs;
+                            ? MinIncompleteSentenceTimeoutMs
+                            : DefaultFlushTimeoutMs;
                     }
                     else
                     {

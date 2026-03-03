@@ -518,7 +518,7 @@ while (!quit)
 
     // ── フラグメント結合 (常時動作) ──
     fragmentMerger?.Dispose();
-    fragmentMerger = new FragmentMerger(settings.TranslationMergeWindowMs);
+    fragmentMerger = new FragmentMerger();
     // 逐次マージ → UI のフラグメントを統合 (行に追記)
     fragmentMerger.OnMerged += (originalEntries, mergedEntry) =>
     {

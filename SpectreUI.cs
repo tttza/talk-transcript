@@ -144,25 +144,6 @@ internal sealed class SpectreUI
         }
     }
 
-    /// <summary>
-    /// 最後の非ブックマークエントリを更新する (スレッドセーフ)。
-    /// フラグメントの逐次マージ時に、既存の行にテキストを追記するために使用。
-    /// </summary>
-    public void UpdateLastEntry(TranscriptEntry updatedEntry)
-    {
-        lock (_lock)
-        {
-            for (int i = _entries.Count - 1; i >= 0; i--)
-            {
-                if (!_entries[i].IsBookmark)
-                {
-                    _entries[i] = updatedEntry;
-                    break;
-                }
-            }
-        }
-    }
-
     /// <summary>処理中状態を設定する (スレッドセーフ)</summary>
     public void SetProcessing(string speaker, double durationSec)
     {

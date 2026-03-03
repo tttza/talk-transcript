@@ -98,13 +98,6 @@ public class AppSettings
     /// </summary>
     public int AudioBoostMaxGain { get; set; } = 10;
 
-    /// <summary>
-    /// 翻訳マージウィンドウ (ミリ秒)。
-    /// 同一話者の連続フラグメントをこの時間内にバッファリングし、
-    /// 結合して一括翻訳することで文脈を保持した翻訳を行う。
-    /// 0 = マージ無効 (従来動作)。推奨値: 1500。
-    /// </summary>
-    public int TranslationMergeWindowMs { get; set; } = 1500;
 
 
     // ── GPU バックエンド ヘルパー ──

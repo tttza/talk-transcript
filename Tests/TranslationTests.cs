@@ -194,7 +194,7 @@ public class TranslationTests
     {
         // 逐次マージ: 同一話者の未完フラグメントを結合
         // OnMerged はフラグメント追加のたびに発火される (逐次)
-        using var merger = new FragmentMerger(mergeWindowMs: 500);
+        using var merger = new FragmentMerger();
 
         var mergeHistory = new System.Collections.Concurrent.ConcurrentBag<(IReadOnlyList<TranscriptEntry> originals, TranscriptEntry merged)>();
         var flushedResults = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>();
@@ -232,7 +232,7 @@ public class TranslationTests
     [Fact]
     public void FragmentMerger_FlushesOnSpeakerChange()
     {
-        using var merger = new FragmentMerger(mergeWindowMs: 500);
+        using var merger = new FragmentMerger();
 
         var flushedResults = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>();
         var signal = new CountdownEvent(2);
@@ -258,7 +258,7 @@ public class TranslationTests
     {
         // 文末記号で終わるフラグメントは、次のフラグメント到着時にフラッシュされる
         // → 完結した文が不要に結合されない
-        using var merger = new FragmentMerger(mergeWindowMs: 5000);
+        using var merger = new FragmentMerger();
 
         var flushedResults = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>();
         var signal = new CountdownEvent(3);
@@ -420,7 +420,7 @@ public class TranslationTests
     {
         // 文が未完のフラグメントを送信し、次のフラグメントが通常のマージウィンドウより
         // 大幅に遅れて到着しても結合されることを確認 (Whisper の処理遅延をシミュレート)
-        using var merger = new FragmentMerger(mergeWindowMs: 300);
+        using var merger = new FragmentMerger();
 
         var results = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>();
         var signal = new CountdownEvent(1);
