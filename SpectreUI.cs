@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Spectre.Console;
 using Spectre.Console.Rendering;
 using TalkTranscript.Models;
@@ -65,6 +66,26 @@ internal sealed class SpectreUI
         }
     }
 
+    /// <summary>翻訳結果でエントリを更新する (スレッドセーフ)</summary>
+    public void UpdateTranslation(TranscriptEntry translatedEntry)
+    {
+        lock (_lock)
+        {
+            // タイムスタンプ + Speaker + Text で照合して更新
+            for (int i = _entries.Count - 1; i >= 0; i--)
+            {
+                var e = _entries[i];
+                if (e.Timestamp == translatedEntry.Timestamp
+                    && e.Speaker == translatedEntry.Speaker
+                    && e.Text == translatedEntry.Text)
+                {
+                    _entries[i] = translatedEntry;
+                    break;
+                }
+            }
+        }
+    }
+
     /// <summary>処理中状態を設定する (スレッドセーフ)</summary>
     public void SetProcessing(string speaker, double durationSec)
     {
@@ -122,27 +143,52 @@ internal sealed class SpectreUI
         var spinnerFrames = new[] { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
         int frame = 0;
 
-        AnsiConsole.Live(new Text(""))
-            .AutoClear(false)
-            .Overflow(VerticalOverflow.Ellipsis)
-            .Start(ctx =>
-            {
-                while (true)
+        // ── ネイティブライブラリ (ONNX Runtime, whisper.cpp) の stderr 出力を抑制 ──
+        // Live 表示中に stderr へ書き込まれると赤文字で一瞬表示されてしまうため、
+        // セッション中は stderr を NUL にリダイレクトする。
+        var savedError = Console.Error;
+        int savedFd = -1;
+        try { savedFd = NativeStderr.Suppress(); } catch { /* P/Invoke 失敗時は無視 */ }
+        Console.SetError(TextWriter.Null);
+
+        try
+        {
+            AnsiConsole.Live(new Text(""))
+                .AutoClear(false)
+                .Overflow(VerticalOverflow.Ellipsis)
+                .Start(ctx =>
                 {
-                    // ── キー入力チェック ──
-                    var input = CheckKeyInput();
-                    if (input != null) { action = input; break; }
+                    while (true)
+                    {
+                        // ── キー入力チェック ──
+                        var input = CheckKeyInput();
+                        if (input != null) { action = input; break; }
 
-                    // ── テストモード自動停止 ──
-                    if (_isTest && (DateTime.Now - _startTime).TotalSeconds >= _testSeconds)
-                    { action = "quit"; break; }
+                        // ── テストモード自動停止 ──
+                        if (_isTest && (DateTime.Now - _startTime).TotalSeconds >= _testSeconds)
+                        { action = "quit"; break; }
 
-                    // ── 表示更新 ──
-                    ctx.UpdateTarget(BuildDisplay(spinnerFrames[frame % spinnerFrames.Length]));
-                    frame++;
-                    Thread.Sleep(100);
-                }
-            });
+                        // ── 表示更新 ──
+                        try
+                        {
+                            ctx.UpdateTarget(BuildDisplay(spinnerFrames[frame % spinnerFrames.Length]));
+                        }
+                        catch (Exception ex)
+                        {
+                            // レンダリングエラーは握りつぶして次フレームでリトライ
+                            Logging.AppLogger.Warn($"Live 表示更新エラー: {ex.Message}");
+                        }
+                        frame++;
+                        Thread.Sleep(100);
+                    }
+                });
+        }
+        finally
+        {
+            // ── stderr を復帰 ──
+            Console.SetError(savedError);
+            try { NativeStderr.Restore(savedFd); } catch { }
+        }
 
         return action ?? "quit";
     }
@@ -173,6 +219,8 @@ internal sealed class SpectreUI
                 {
                     var entry = _entries[lastCount];
                     Console.WriteLine($"  [{entry.Timestamp:HH:mm:ss}] {entry.Speaker}: {entry.Text}");
+                    if (!string.IsNullOrEmpty(entry.TranslatedText))
+                        Console.WriteLine($"             ↳ {entry.TranslatedText}");
                     lastCount++;
                 }
             }
@@ -365,6 +413,13 @@ internal sealed class SpectreUI
                 $"  [dim]{entry.Timestamp:HH:mm:ss}[/]  " +
                 $"[{color}]{icon} {Markup.Escape(entry.Speaker)}:[/] " +
                 Markup.Escape(entry.Text)));
+
+            // 翻訳テキストがある場合は直下に表示
+            if (!string.IsNullOrEmpty(entry.TranslatedText))
+            {
+                bodyRows.Add(new Markup(
+                    $"             [green]↳ {Markup.Escape(entry.TranslatedText)}[/]"));
+            }
         }
 
         if (hiddenBelow > 0)
@@ -431,7 +486,16 @@ internal sealed class SpectreUI
         // 表示プレフィクス: "  HH:mm:ss  ▶ Speaker: " (Markup タグは幅 0)
         int prefixWidth = 2 + 8 + 2 + 2 + EstimateDisplayWidth(entry.Speaker) + 2;
         int totalWidth = prefixWidth + EstimateDisplayWidth(entry.Text);
-        return Math.Max(1, (int)Math.Ceiling((double)totalWidth / Math.Max(1, consoleWidth)));
+        int lines = Math.Max(1, (int)Math.Ceiling((double)totalWidth / Math.Max(1, consoleWidth)));
+
+        // 翻訳行がある場合は追加行を計算
+        if (!string.IsNullOrEmpty(entry.TranslatedText))
+        {
+            int transWidth = 13 + 2 + EstimateDisplayWidth(entry.TranslatedText); // "             ↳ "
+            lines += Math.Max(1, (int)Math.Ceiling((double)transWidth / Math.Max(1, consoleWidth)));
+        }
+
+        return lines;
     }
 
     /// <summary>
@@ -517,5 +581,57 @@ internal sealed class SpectreUI
     {
         AnsiConsole.Write(new Rule($"[dim]{Markup.Escape(title)}[/]").RuleStyle("dim").LeftJustified());
         AnsiConsole.WriteLine();
+    }
+}
+
+/// <summary>
+/// ネイティブライブラリ (ONNX Runtime, whisper.cpp) の stderr 出力を
+/// Live 表示中に抑制するためのヘルパー。
+/// C ランタイムの _dup/_dup2 を使ってファイルディスクリプタ 2 (stderr) を
+/// NUL にリダイレクトし、セッション終了後に復帰する。
+/// </summary>
+internal static class NativeStderr
+{
+    private const int StderrFd = 2;
+
+    [DllImport("ucrtbase.dll", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
+    private static extern int _dup(int fd);
+
+    [DllImport("ucrtbase.dll", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
+    private static extern int _dup2(int fd1, int fd2);
+
+    [DllImport("ucrtbase.dll", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
+    private static extern int _close(int fd);
+
+    [DllImport("ucrtbase.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi, SetLastError = true)]
+    private static extern int _open(string filename, int oflag);
+
+    private const int O_WRONLY = 1;
+
+    /// <summary>
+    /// stderr を NUL にリダイレクトし、復帰用のファイルディスクリプタを返す。
+    /// 失敗した場合は -1 を返す。
+    /// </summary>
+    public static int Suppress()
+    {
+        int saved = _dup(StderrFd);
+        if (saved < 0) return -1;
+
+        int nulFd = _open("NUL", O_WRONLY);
+        if (nulFd < 0) { _close(saved); return -1; }
+
+        _dup2(nulFd, StderrFd);
+        _close(nulFd);
+        return saved;
+    }
+
+    /// <summary>
+    /// Suppress で保存したファイルディスクリプタから stderr を復帰する。
+    /// </summary>
+    public static void Restore(int savedFd)
+    {
+        if (savedFd < 0) return;
+        _dup2(savedFd, StderrFd);
+        _close(savedFd);
     }
 }

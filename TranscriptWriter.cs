@@ -72,10 +72,28 @@ public sealed class TranscriptWriter : IDisposable
             }
 
             _writer.WriteLine($"[{entry.Timestamp:HH:mm:ss}] {entry.Speaker}: {entry.Text}");
+            if (!string.IsNullOrEmpty(entry.TranslatedText))
+                _writer.WriteLine($"             → {entry.TranslatedText}");
             _lastSpeaker = entry.Speaker;
 
             if (entry.Speaker == "自分") _selfCount++;
             else _otherCount++;
+        }
+    }
+
+    /// <summary>
+    /// 翻訳結果を追記する (非同期翻訳で後から結果が届いた場合用)。スレッドセーフ。
+    /// タイムスタンプ付きで出力し、どのエントリの翻訳かを明示する。
+    /// </summary>
+    public void AppendTranslation(TranscriptEntry entry)
+    {
+        if (_closed || _disposed) return;
+        if (string.IsNullOrEmpty(entry.TranslatedText)) return;
+
+        lock (_writer)
+        {
+            if (_closed || _disposed) return;
+            _writer.WriteLine($"  [{entry.Timestamp:HH:mm:ss}] → {entry.TranslatedText}");
         }
     }
 

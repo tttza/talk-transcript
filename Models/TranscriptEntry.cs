@@ -9,10 +9,12 @@ namespace TalkTranscript.Models;
 /// <param name="Duration">発話の長さ (取得可能な場合)</param>
 /// <param name="SpeakerId">話者識別 ID (ダイアライゼーション用。null で未識別)</param>
 /// <param name="IsBookmark">ブックマークエントリかどうか</param>
+/// <param name="TranslatedText">翻訳テキスト (翻訳が有効な場合に設定)</param>
 public record TranscriptEntry(
     DateTime Timestamp,
     string Speaker,
     string Text,
     TimeSpan? Duration = null,
     int? SpeakerId = null,
-    bool IsBookmark = false);
+    bool IsBookmark = false,
+    string? TranslatedText = null);

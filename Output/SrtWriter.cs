@@ -30,6 +30,8 @@ public static class SrtWriter
             writer.WriteLine(seq++);
             writer.WriteLine($"{FormatSrtTime(start)} --> {FormatSrtTime(end)}");
             writer.WriteLine($"[{entry.Speaker}] {entry.Text}");
+            if (!string.IsNullOrEmpty(entry.TranslatedText))
+                writer.WriteLine(entry.TranslatedText);
             writer.WriteLine();
         }
     }

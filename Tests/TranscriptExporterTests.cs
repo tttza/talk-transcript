@@ -140,4 +140,59 @@ public class TranscriptExporterTests : IDisposable
         var content = File.ReadAllText(files[0]);
         Assert.Contains("isBookmark", content);
     }
+
+    [Fact]
+    public void Export_Json_IncludesTranslatedText()
+    {
+        var basePath = Path.Combine(_tempDir, "transcript.txt");
+        var start = new DateTime(2026, 3, 1, 10, 0, 0);
+        var entries = new List<TranscriptEntry>
+        {
+            new(start, "相手", "Hello", TranslatedText: "こんにちは"),
+            new(start.AddSeconds(5), "自分", "テスト"),
+        };
+
+        var files = TranscriptExporter.Export(basePath, entries,
+            new[] { OutputFormat.Json }, start, TimeSpan.FromMinutes(1), "whisper-base", "en");
+
+        var content = File.ReadAllText(files[0]);
+        Assert.Contains("translatedText", content);
+        Assert.Contains("こんにちは", content);
+    }
+
+    [Fact]
+    public void Export_Srt_IncludesTranslatedText()
+    {
+        var basePath = Path.Combine(_tempDir, "transcript.txt");
+        var start = new DateTime(2026, 3, 1, 10, 0, 0);
+        var entries = new List<TranscriptEntry>
+        {
+            new(start, "相手", "Hello", TranslatedText: "こんにちは"),
+        };
+
+        var files = TranscriptExporter.Export(basePath, entries,
+            new[] { OutputFormat.Srt }, start, TimeSpan.FromMinutes(1), "whisper-base", "en");
+
+        var content = File.ReadAllText(files[0]);
+        Assert.Contains("Hello", content);
+        Assert.Contains("こんにちは", content);
+    }
+
+    [Fact]
+    public void Export_Markdown_IncludesTranslatedText()
+    {
+        var basePath = Path.Combine(_tempDir, "transcript.txt");
+        var start = new DateTime(2026, 3, 1, 10, 0, 0);
+        var entries = new List<TranscriptEntry>
+        {
+            new(start, "相手", "Hello", TranslatedText: "こんにちは"),
+        };
+
+        var files = TranscriptExporter.Export(basePath, entries,
+            new[] { OutputFormat.Markdown }, start, TimeSpan.FromMinutes(1), "whisper-base", "en");
+
+        var content = File.ReadAllText(files[0]);
+        Assert.Contains("Hello", content);
+        Assert.Contains("こんにちは", content);
+    }
 }

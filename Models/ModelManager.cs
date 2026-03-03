@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Net.Http;
+using TalkTranscript.Translation;
 
 namespace TalkTranscript.Models;
 
@@ -176,5 +177,141 @@ public static class ModelManager
         Console.ResetColor();
 
         return modelPath;
+    }
+
+    // ── 翻訳モデル ──
+
+    /// <summary>翻訳モデルのディレクトリ名を返す</summary>
+    private static string TranslationModelDirName(string sourceLang, string targetLang) =>
+        $"translation-{sourceLang}-{targetLang}";
+
+    /// <summary>翻訳モデルのディレクトリパスを返す。未ダウンロードなら null。</summary>
+    public static string? GetTranslationModelPath(string sourceLang, string targetLang)
+    {
+        string dir = Path.Combine(ModelsDir, TranslationModelDirName(sourceLang, targetLang));
+        return Directory.Exists(dir)
+            && File.Exists(Path.Combine(dir, "encoder_model.onnx"))
+            && File.Exists(Path.Combine(dir, "decoder_model.onnx"))
+            && File.Exists(Path.Combine(dir, "decoder_with_past_model.onnx"))
+            && File.Exists(Path.Combine(dir, "vocab.json"))
+            ? dir : null;
+    }
+
+    /// <summary>
+    /// 翻訳モデル (Helsinki-NLP Opus-MT ONNX) をダウンロードする。
+    /// 個別ファイルを Hugging Face から取得する。
+    /// </summary>
+    public static async Task<string> EnsureTranslationModelAsync(string sourceLang, string targetLang)
+    {
+        string dirName = TranslationModelDirName(sourceLang, targetLang);
+        string modelDir = Path.Combine(ModelsDir, dirName);
+
+        // キャッシュ確認
+        if (GetTranslationModelPath(sourceLang, targetLang) != null)
+        {
+            Logging.AppLogger.Info($"翻訳モデル: {modelDir} (キャッシュ済み)");
+            return modelDir;
+        }
+
+        // 言語ペア確認
+        string? baseUrl = LanguagePairs.GetModelBaseUrl(sourceLang, targetLang);
+        if (baseUrl == null)
+            throw new NotSupportedException($"未サポートの言語ペア: {sourceLang} → {targetLang}");
+
+        Directory.CreateDirectory(modelDir);
+
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine($"[翻訳モデル] {sourceLang}→{targetLang} モデルをダウンロード中...");
+        Console.ResetColor();
+
+        using var http = new HttpClient();
+        http.Timeout = TimeSpan.FromMinutes(30);
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("TalkTranscript/1.0");
+
+        var info = LanguagePairs.GetInfo(sourceLang, targetLang)!;
+
+        foreach (string file in LanguagePairs.RequiredFiles)
+        {
+            string filePath = Path.Combine(modelDir, file);
+            if (File.Exists(filePath))
+            {
+                Console.WriteLine($"  ✓ {file} (既存)");
+                continue;
+            }
+
+            // ファイル URL を構築
+            // ONNX モデルは onnx/ サブディレクトリに、SPM/config は直下にある場合がある
+            string url;
+            if (file.EndsWith(".onnx"))
+                url = $"https://huggingface.co/{info.HuggingFaceRepo}/resolve/main/onnx/{file}";
+            else
+                url = $"https://huggingface.co/{info.HuggingFaceRepo}/resolve/main/{file}";
+
+            string tempPath = filePath + ".tmp";
+            Console.Write($"  ↓ {file}...");
+
+            try
+            {
+                using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    // ONNX ファイルが onnx/ にない場合、ルートを試す
+                    if (file.EndsWith(".onnx"))
+                    {
+                        url = $"https://huggingface.co/{info.HuggingFaceRepo}/resolve/main/{file}";
+                        response.Dispose();
+                        using var retryResponse = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+                        retryResponse.EnsureSuccessStatusCode();
+                        await DownloadFile(retryResponse, tempPath);
+                    }
+                    else
+                    {
+                        response.EnsureSuccessStatusCode();
+                    }
+                }
+                else
+                {
+                    await DownloadFile(response, tempPath);
+                }
+
+                File.Move(tempPath, filePath, overwrite: true);
+                Console.WriteLine(" OK");
+            }
+            catch (HttpRequestException ex)
+            {
+                // 一時ファイルのクリーンアップ
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+                Console.WriteLine($" スキップ ({ex.StatusCode})");
+                Logging.AppLogger.Warn($"翻訳モデルファイル取得失敗: {file} - {ex.Message}");
+                // tokenizer_config.json は必須ではない
+                if (file != "tokenizer_config.json")
+                {
+                    // 必須ファイルがダウンロードできない場合はエラー
+                    try { Directory.Delete(modelDir, true); } catch { }
+                    throw new InvalidOperationException($"翻訳モデルのダウンロードに失敗: {file}", ex);
+                }
+            }
+            catch (Exception ex)
+            {
+                // 一時ファイルのクリーンアップ
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+                throw;
+            }
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"[翻訳モデル] 準備完了: {modelDir}");
+        Console.ResetColor();
+
+        return modelDir;
+    }
+
+
+    private static async Task DownloadFile(HttpResponseMessage response, string path)
+    {
+        using var contentStream = await response.Content.ReadAsStreamAsync();
+        using var fileStream = File.Create(path);
+        await contentStream.CopyToAsync(fileStream);
     }
 }

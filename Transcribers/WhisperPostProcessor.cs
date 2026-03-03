@@ -139,7 +139,7 @@ public static class WhisperPostProcessor
                 Text: text,
                 Duration: duration));
 
-            Console.WriteLine($"[Whisper] [{segment.Start:mm\\:ss} → {segment.End:mm\\:ss}] {speaker}: {text}");
+            Console.WriteLine($"[Whisper] [{segment.Start:mm\\:ss} → {segment.End:mm\\:ss}] {speaker}: ({text.Length}文字)");
             lastText = text;
         }
 

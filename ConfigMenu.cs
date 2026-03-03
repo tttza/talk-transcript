@@ -3,6 +3,7 @@ using TalkTranscript.Audio;
 using TalkTranscript.Logging;
 using TalkTranscript.Models;
 using TalkTranscript.Output;
+using TalkTranscript.Translation;
 
 namespace TalkTranscript;
 
@@ -31,6 +32,7 @@ internal static class ConfigMenu
             ("エンジン",         () => ConfigureEngine(settings, hwProfile)),
             ("GPU (CUDA)",      () => ConfigureGpu(settings)),
             ("言語",             () => ConfigureLanguage(settings)),
+            ("翻訳",             () => ConfigureTranslation(settings)),
             ("出力ディレクトリ",   () => ConfigureOutputDirectory(settings)),
             ("出力フォーマット",   () => ConfigureOutputFormats(settings)),
             ("デバイス",         () => ConfigureDevices(settings)),
@@ -218,6 +220,18 @@ internal static class ConfigMenu
         table.AddRow("マイク", Markup.Escape(settings.MicrophoneDeviceName ?? "(未設定)"));
         table.AddRow("スピーカー", Markup.Escape(settings.SpeakerDeviceName ?? "(未設定)"));
 
+        // 翻訳設定
+        if (settings.EnableTranslation)
+        {
+            string transLang = $"{settings.TranslationSourceLang ?? "auto"} → {settings.TranslationTargetLang}";
+            string transGpu = settings.TranslationUseGpu ? "GPU" : "CPU";
+            table.AddRow("翻訳", $"[green]有効[/] ({Markup.Escape(transLang)}, {transGpu}, 対象: {Markup.Escape(settings.TranslationTarget)})");
+        }
+        else
+        {
+            table.AddRow("翻訳", "[dim]無効[/]");
+        }
+
         AnsiConsole.Write(table);
         AnsiConsole.WriteLine();
     }
@@ -382,6 +396,85 @@ internal static class ConfigMenu
         AnsiConsole.WriteLine();
     }
 
+    private static void ConfigureTranslation(AppSettings settings)
+    {
+        SpectreUI.PrintSectionHeader("翻訳設定");
+
+        settings.EnableTranslation = AnsiConsole.Confirm("  リアルタイム翻訳を有効にしますか?", settings.EnableTranslation);
+
+        if (settings.EnableTranslation)
+        {
+            // 翻訳元言語
+            var srcChoices = new List<string> { "auto - 自動 (認識言語を使用)" };
+            foreach (var (code, name) in LanguagePairs.TargetLanguages)
+                srcChoices.Add($"{code} - {name}");
+
+            var srcChoice = AnsiConsole.Prompt(
+                new SelectionPrompt<string>()
+                    .Title("[cyan]  翻訳元言語:[/]")
+                    .AddChoices(srcChoices));
+
+            string srcCode = srcChoice.Split(' ')[0];
+            settings.TranslationSourceLang = srcCode == "auto" ? null : srcCode;
+
+            // 翻訳先言語
+            var tgtChoices = LanguagePairs.TargetLanguages
+                .Select(l => $"{l.Code} - {l.Name}").ToList();
+
+            var tgtChoice = AnsiConsole.Prompt(
+                new SelectionPrompt<string>()
+                    .Title("[cyan]  翻訳先言語:[/]")
+                    .AddChoices(tgtChoices));
+
+            settings.TranslationTargetLang = tgtChoice.Split(' ')[0];
+
+            // 翻訳対象
+            var targetChoice = AnsiConsole.Prompt(
+                new SelectionPrompt<string>()
+                    .Title("[cyan]  翻訳対象:[/]")
+                    .AddChoices("相手 — 相手の発言のみ翻訳", "自分 — 自分の発言のみ翻訳", "両方 — 全ての発言を翻訳"));
+
+            settings.TranslationTarget = targetChoice.Split(' ')[0];
+
+            // GPU
+            settings.TranslationUseGpu = AnsiConsole.Confirm("  翻訳で GPU を使用しますか?", settings.TranslationUseGpu);
+
+            // 言語ペアの有効性を確認
+            // 翻訳元 auto の場合、現在の認識言語設定から推定
+            string effectiveSrc = settings.TranslationSourceLang
+                ?? (!string.IsNullOrEmpty(settings.Language) && settings.Language != "auto"
+                    ? settings.Language
+                    : "en");
+
+            // 同一言語ペアの回避
+            if (string.Equals(effectiveSrc, settings.TranslationTargetLang, StringComparison.OrdinalIgnoreCase))
+            {
+                effectiveSrc = string.Equals(settings.TranslationTargetLang, "en", StringComparison.OrdinalIgnoreCase)
+                    ? "ja" : "en";
+                AnsiConsole.MarkupLine($"  [dim]翻訳元と翻訳先が同じため、翻訳元を {effectiveSrc} に自動調整します。[/]");
+            }
+
+            if (!LanguagePairs.IsSupported(effectiveSrc, settings.TranslationTargetLang))
+            {
+                AnsiConsole.MarkupLine($"  [yellow]⚠ {effectiveSrc}→{settings.TranslationTargetLang} の翻訳モデルは現在未サポートです。[/]");
+                AnsiConsole.MarkupLine($"  [dim]  サポート言語ペア:[/]");
+                foreach (var (key, desc) in LanguagePairs.GetAllPairs())
+                    AnsiConsole.MarkupLine($"  [dim]    {key}: {desc}[/]");
+            }
+
+            AnsiConsole.MarkupLine($"  [green]→ 翻訳: {effectiveSrc}→{settings.TranslationTargetLang} " +
+                                  $"(対象: {settings.TranslationTarget}, " +
+                                  $"{(settings.TranslationUseGpu ? "GPU" : "CPU")})[/]");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine("  [green]→ 翻訳: 無効[/]");
+        }
+
+        settings.Save();
+        AnsiConsole.WriteLine();
+    }
+
     private static void ConfigureResources(AppSettings settings)
     {
         SpectreUI.PrintSectionHeader("リソース制御");
@@ -509,6 +602,11 @@ internal static class ConfigMenu
             settings.SaveRecording = fresh.SaveRecording;
             settings.MaxCpuThreads = fresh.MaxCpuThreads;
             settings.ProcessPriority = fresh.ProcessPriority;
+            settings.EnableTranslation = fresh.EnableTranslation;
+            settings.TranslationSourceLang = fresh.TranslationSourceLang;
+            settings.TranslationTargetLang = fresh.TranslationTargetLang;
+            settings.TranslationTarget = fresh.TranslationTarget;
+            settings.TranslationUseGpu = fresh.TranslationUseGpu;
 
             AnsiConsole.MarkupLine("  [green]設定をリセットしました。[/]");
         }

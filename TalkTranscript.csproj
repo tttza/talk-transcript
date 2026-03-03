@@ -40,6 +40,7 @@
     <PackageReference Include="Whisper.net" Version="1.9.0" />
     <PackageReference Include="Whisper.net.Runtime" Version="1.9.0" />
     <PackageReference Include="Whisper.net.Runtime.Cuda" Version="1.9.0" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.2" />
   </ItemGroup>
 
   <!-- publish 時にターゲット RID 以外のネイティブライブラリを除外 -->

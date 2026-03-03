@@ -334,7 +334,7 @@ public sealed class SapiCallTranscriber : ICallTranscriber
     {
         // SpeechDetected 時点で記録したソースを使う (認識中のソース切替による誤判定を防止)
         string speaker = _speechDetectedMicActive ? "自分" : "相手";
-        Console.WriteLine($"[通話] 認識 ({speaker}): \"{e.Result.Text}\" (信頼度: {e.Result.Confidence:F2})");
+        Console.WriteLine($"[通話] 認識 ({speaker}): ({e.Result.Text.Length}文字) (信頼度: {e.Result.Confidence:F2})");
 
         if (e.Result.Confidence < 0.1f) return;
 
@@ -354,8 +354,7 @@ public sealed class SapiCallTranscriber : ICallTranscriber
 
     private void OnSpeechRejected(object? sender, SpeechRecognitionRejectedEventArgs e)
     {
-        var altText = e.Result.Alternates.Count > 0 ? e.Result.Alternates[0].Text : "(なし)";
-        Console.WriteLine($"[通話] 棄却 (信頼度: {e.Result.Confidence:F2}, 候補: \"{altText}\")");
+        Console.WriteLine($"[通話] 棄却 (信頼度: {e.Result.Confidence:F2})");
     }
 
     private void OnRecognizeCompleted(object? sender, RecognizeCompletedEventArgs e)

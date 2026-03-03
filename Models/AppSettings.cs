@@ -57,6 +57,23 @@ public class AppSettings
     [JsonConverter(typeof(OutputFormatsConverter))]
     public List<OutputFormat>? OutputFormats { get; set; }
 
+    // ── 翻訳設定 ──
+
+    /// <summary>リアルタイム翻訳を有効にするか</summary>
+    public bool EnableTranslation { get; set; } = false;
+
+    /// <summary>翻訳元言語 (null = 自動検出)</summary>
+    public string? TranslationSourceLang { get; set; }
+
+    /// <summary>翻訳先言語</summary>
+    public string TranslationTargetLang { get; set; } = "ja";
+
+    /// <summary>翻訳対象 ("相手" / "自分" / "両方")</summary>
+    public string TranslationTarget { get; set; } = "相手";
+
+    /// <summary>翻訳で GPU を使用するか</summary>
+    public bool TranslationUseGpu { get; set; } = true;
+
     // ── 永続化 ──
 
     private static readonly JsonSerializerOptions JsonOptions = new()

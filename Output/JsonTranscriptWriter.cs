@@ -44,7 +44,8 @@ public static class JsonTranscriptWriter
                 Text = e.Text,
                 DurationMs = e.Duration.HasValue ? (int)e.Duration.Value.TotalMilliseconds : null,
                 SpeakerId = e.SpeakerId,
-                IsBookmark = e.IsBookmark ? true : null
+                IsBookmark = e.IsBookmark ? true : null,
+                TranslatedText = e.TranslatedText
             }).ToList()
         };
 
@@ -112,5 +113,8 @@ public static class JsonTranscriptWriter
 
         [JsonPropertyName("isBookmark")]
         public bool? IsBookmark { get; set; }
+
+        [JsonPropertyName("translatedText")]
+        public string? TranslatedText { get; set; }
     }
 }

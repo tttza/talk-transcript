@@ -70,7 +70,11 @@ public static class MarkdownWriter
             string icon = entry.Speaker == "自分" ? "🎤" : "🔊";
             writer.WriteLine($"**{icon} {entry.Speaker}** `{entry.Timestamp:HH:mm:ss}`  ");
             writer.WriteLine($"{entry.Text}");
-
+            if (!string.IsNullOrEmpty(entry.TranslatedText))
+            {
+                writer.WriteLine();
+                writer.WriteLine($"> *{entry.TranslatedText}*");
+            }
             lastSpeaker = entry.Speaker;
         }
 

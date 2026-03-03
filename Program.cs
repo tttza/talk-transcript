@@ -4,6 +4,7 @@ using TalkTranscript.Logging;
 using TalkTranscript.Models;
 using TalkTranscript.Output;
 using TalkTranscript.Transcribers;
+using TalkTranscript.Translation;
 using System.Globalization;
 using System.Speech.Recognition;
 using Spectre.Console;
@@ -179,7 +180,100 @@ IncrementalJsonWriter? jsonWriter = outputJson ? new IncrementalJsonWriter(jsonP
 var overallStart = DateTime.Now;
 int totalMicCount = 0;
 int totalSpkCount = 0;
-var allEntries = new System.Collections.Concurrent.ConcurrentBag<TranscriptEntry>(); // 全セッションのエントリを蓄積 (エクスポート用・スレッドセーフ)
+var allEntries = new System.Collections.Concurrent.ConcurrentDictionary<int, TranscriptEntry>(); // 全セッションのエントリを蓄積 (エクスポート用・スレッドセーフ)
+int _entrySeq = 0; // エントリの連番 (Interlocked で安全にインクリメント)
+
+// ── 翻訳エンジン初期化 ──
+ITranslator? translator = null;
+TranslationWorker? translationWorker = null;
+
+/// <summary>翻訳元言語を推定する (auto 時や同一言語ペア回避、サポートペア検証)</summary>
+string ResolveTranslationSource(AppSettings s, string recogLang)
+{
+    string src = s.TranslationSourceLang
+        ?? (recogLang == "auto" ? null : recogLang)
+        ?? "en";
+    string tgt = s.TranslationTargetLang;
+
+    // 同一言語ペアの回避: 対になる言語を推定
+    if (string.Equals(src, tgt, StringComparison.OrdinalIgnoreCase))
+    {
+        // 認識言語が明示されていれば、翻訳先と異なる言語を使う
+        if (!string.IsNullOrEmpty(recogLang) && recogLang != "auto"
+            && !string.Equals(recogLang, tgt, StringComparison.OrdinalIgnoreCase))
+        {
+            src = recogLang;
+        }
+        else
+        {
+            // デフォルトの対: ja↔en
+            src = string.Equals(tgt, "en", StringComparison.OrdinalIgnoreCase) ? "ja" : "en";
+        }
+    }
+
+    // サポートペア検証: 推定した src→tgt が未サポートなら代替を探す
+    if (!LanguagePairs.IsSupported(src, tgt))
+    {
+        // 認識言語から再試行
+        if (!string.IsNullOrEmpty(recogLang) && recogLang != "auto"
+            && !string.Equals(recogLang, src, StringComparison.OrdinalIgnoreCase)
+            && LanguagePairs.IsSupported(recogLang, tgt))
+        {
+            src = recogLang;
+        }
+        // tgt→src の逆方向がサポートされていれば、方向を示唆 (ログのみ)
+        else if (LanguagePairs.IsSupported(tgt, src))
+        {
+            AppLogger.Warn($"翻訳ペア {src}→{tgt} は未サポート。逆方向 {tgt}→{src} は利用可能です。");
+        }
+    }
+
+    return src;
+}
+
+async Task InitTranslationAsync()
+{
+    // 既存のワーカー/エンジンを停止・破棄
+    translationWorker?.Stop();
+    translationWorker?.Dispose();
+    translationWorker = null;
+    translator?.Dispose();
+    translator = null;
+
+    if (!settings.EnableTranslation) return;
+
+    try
+    {
+        string transSrc = ResolveTranslationSource(settings, language);
+        string transTgt = settings.TranslationTargetLang;
+
+        if (LanguagePairs.IsSupported(transSrc, transTgt))
+        {
+            AnsiConsole.MarkupLine($"  [dim]翻訳モデル ({transSrc}→{transTgt}) を準備中...[/]");
+            string modelDir = await ModelManager.EnsureTranslationModelAsync(transSrc, transTgt);
+
+            bool transGpu = settings.TranslationUseGpu;
+            var marianTranslator = new MarianTranslator(modelDir, transSrc, transTgt, transGpu);
+            translator = marianTranslator;
+            translationWorker = new TranslationWorker(translator, settings.TranslationTarget);
+
+            string epLabel = marianTranslator.UsingGpu ? "GPU/DirectML" : "CPU";
+            AnsiConsole.MarkupLine($"  [green]✓ 翻訳エンジン準備完了 ({transSrc}→{transTgt}, {epLabel})[/]");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"  [yellow]⚠ 翻訳言語ペア {transSrc}→{transTgt} は未サポートです。翻訳を無効化します。[/]");
+        }
+    }
+    catch (Exception ex)
+    {
+        AppLogger.Error("翻訳エンジンの初期化に失敗", ex);
+        AnsiConsole.MarkupLine($"  [yellow]⚠ 翻訳エンジンの初期化に失敗: {Markup.Escape(ex.Message)}[/]");
+        AnsiConsole.MarkupLine("  [dim]翻訳なしで続行します。[/]");
+    }
+}
+
+await InitTranslationAsync();
 
 // ── セッションループ ──
 // Ctrl+D/E で停止→設定変更→再開、Ctrl+Q で終了
@@ -191,10 +285,13 @@ int _cleanedUp = 0; // 0=未, 1=済 (Interlockedでアトミックに制御)
 void EmergencyCleanup()
 {
     if (Interlocked.Exchange(ref _cleanedUp, 1) != 0) return;
+    try { translationWorker?.Stop(); } catch { }
+    try { translationWorker?.Dispose(); } catch { }
     try { lastTranscriber?.Stop(); } catch { }
     try { lastTranscriber?.Dispose(); } catch { }
     try { writer?.Close(); } catch { }
     try { jsonWriter?.Dispose(); } catch { } // NDJSON のまま保存 (クラッシュリカバリ用)
+    try { translator?.Dispose(); } catch { }
 }
 AppDomain.CurrentDomain.ProcessExit += (_, _) => EmergencyCleanup();
 Console.CancelKeyPress += (_, e) =>
@@ -293,13 +390,41 @@ while (!quit)
         {
             AppLogger.Error("JSON 書き出しエラー (認識は継続)", ex);
         }
-        allEntries.Add(entry);
+        int seq = Interlocked.Increment(ref _entrySeq);
+        allEntries[seq] = entry;
         if (entry.IsBookmark) { /* ブックマークはカウントしない */ }
         else if (entry.Speaker == "自分") { sessionMic++; totalMicCount++; }
         else { sessionSpk++; totalSpkCount++; }
+
+        // ── 翻訳キューに投入 (非同期翻訳) ──
+        translationWorker?.Enqueue(entry);
     }
 
     callTranscriber.OnTranscribed += OnTranscribed;
+
+    // ── 翻訳結果コールバック ──
+    if (translationWorker != null)
+    {
+        translationWorker.OnTranslated += translatedEntry =>
+        {
+            // UI を翻訳テキストで更新
+            ui.UpdateTranslation(translatedEntry);
+            // テキストファイルに翻訳行を追記
+            try { writer?.AppendTranslation(translatedEntry); }
+            catch (Exception ex) { AppLogger.Error("翻訳テキスト書き出しエラー", ex); }
+            // allEntries 内のエントリも翻訳済みに更新 (エクスポート用)
+            foreach (var kv in allEntries)
+            {
+                if (kv.Value.Timestamp == translatedEntry.Timestamp
+                    && kv.Value.Speaker == translatedEntry.Speaker
+                    && kv.Value.Text == translatedEntry.Text)
+                {
+                    allEntries.TryUpdate(kv.Key, translatedEntry, kv.Value);
+                    break;
+                }
+            }
+        };
+    }
 
     // ── 音量通知 (#2) ──
     callTranscriber.OnVolumeUpdated += (mic, spk) => ui.UpdateVolume(mic, spk);
@@ -317,7 +442,7 @@ while (!quit)
         catch (Exception ex) { AppLogger.Error("ブックマーク書き出しエラー", ex); }
         try { jsonWriter?.Append(bookmark); }
         catch (Exception ex) { AppLogger.Error("ブックマーク JSON 書き出しエラー", ex); }
-        allEntries.Add(bookmark);
+        allEntries[Interlocked.Increment(ref _entrySeq)] = bookmark;
         AppLogger.Info("ブックマークを追加しました");
     };
 
@@ -447,6 +572,8 @@ while (!quit)
                 Console.WriteLine("前回のデバイスが見つかりません。選択してください。");
                 (micDevice, speakerDevice) = DeviceSelector.SelectDevices(settings);
             }
+            // 翻訳エンジン再初期化 (設定変更を反映)
+            await InitTranslationAsync();
             Console.WriteLine();
             break;
     }
@@ -456,11 +583,16 @@ while (!quit)
 }
 
 // ── 最終出力 ──
+// 翻訳ワーカーを停止 (残りのキューを処理完了後)
+translationWorker?.Stop();
+translationWorker?.Dispose();
+translator?.Dispose();
+
 writer?.Close();
 writer?.Dispose();
 
 // JSON 逐次書き出しを完全な JSON に仕上げる
-var sortedEntries = allEntries.OrderBy(e => e.Timestamp).ToList();
+var sortedEntries = allEntries.Values.OrderBy(e => e.Timestamp).ToList();
 if (jsonWriter != null)
 {
     jsonWriter.Close(sortedEntries, overallStart, DateTime.Now - overallStart, engineName, language);

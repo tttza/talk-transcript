@@ -66,7 +66,8 @@ public sealed class IncrementalJsonWriter : IDisposable
                 Text = entry.Text,
                 DurationMs = entry.Duration.HasValue ? (int)entry.Duration.Value.TotalMilliseconds : null,
                 SpeakerId = entry.SpeakerId,
-                IsBookmark = entry.IsBookmark ? true : null
+                IsBookmark = entry.IsBookmark ? true : null,
+                TranslatedText = entry.TranslatedText
             };
 
             string json = JsonSerializer.Serialize(obj, EntryJsonOptions);
@@ -141,5 +142,8 @@ public sealed class IncrementalJsonWriter : IDisposable
 
         [JsonPropertyName("isBookmark")]
         public bool? IsBookmark { get; set; }
+
+        [JsonPropertyName("translatedText")]
+        public string? TranslatedText { get; set; }
     }
 }

@@ -144,4 +144,67 @@ public class TranscriptWriterTests : IDisposable
         Assert.Equal(path, writer.FilePath);
         writer.Close();
     }
+
+    [Fact]
+    public void Append_WithTranslatedText_WritesTranslation()
+    {
+        var path = Path.Combine(_tempDir, "test.txt");
+        var writer = new TranscriptWriter(path);
+
+        writer.Append(new TranscriptEntry(
+            Timestamp: new DateTime(2026, 1, 1, 10, 30, 0),
+            Speaker: "相手",
+            Text: "Hello",
+            TranslatedText: "こんにちは"));
+
+        writer.Close();
+        writer.Dispose();
+
+        var content = File.ReadAllText(path);
+        Assert.Contains("Hello", content);
+        Assert.Contains("→ こんにちは", content);
+    }
+
+    [Fact]
+    public void AppendTranslation_WritesTranslationLine()
+    {
+        var path = Path.Combine(_tempDir, "test.txt");
+        var writer = new TranscriptWriter(path);
+
+        var entry = new TranscriptEntry(
+            Timestamp: new DateTime(2026, 1, 1, 10, 30, 0),
+            Speaker: "相手",
+            Text: "Hello");
+        writer.Append(entry);
+
+        // 後から翻訳結果が届いた場合
+        var translated = entry with { TranslatedText = "こんにちは" };
+        writer.AppendTranslation(translated);
+
+        writer.Close();
+        writer.Dispose();
+
+        var content = File.ReadAllText(path);
+        Assert.Contains("Hello", content);
+        Assert.Contains("→ こんにちは", content);
+    }
+
+    [Fact]
+    public void Append_WithoutTranslatedText_NoTranslationLine()
+    {
+        var path = Path.Combine(_tempDir, "test.txt");
+        var writer = new TranscriptWriter(path);
+
+        writer.Append(new TranscriptEntry(
+            Timestamp: new DateTime(2026, 1, 1, 10, 30, 0),
+            Speaker: "相手",
+            Text: "Hello"));
+
+        writer.Close();
+        writer.Dispose();
+
+        var content = File.ReadAllText(path);
+        Assert.Contains("Hello", content);
+        Assert.DoesNotContain("→", content);
+    }
 }

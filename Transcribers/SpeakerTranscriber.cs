@@ -153,7 +153,7 @@ public sealed class SpeakerTranscriber : IDisposable
     /// </summary>
     private void OnSpeechRecognized(object? sender, SpeechRecognizedEventArgs e)
     {
-        Console.WriteLine($"[スピーカー] 認識: \"{e.Result.Text}\" (信頼度: {e.Result.Confidence:F2})");
+        Console.WriteLine($"[スピーカー] 認識: ({e.Result.Text.Length}文字) (信頼度: {e.Result.Confidence:F2})");
         if (e.Result.Confidence < 0.1f) return;
 
         var entry = new TranscriptEntry(
