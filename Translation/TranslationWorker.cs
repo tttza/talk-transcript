@@ -26,8 +26,21 @@ public sealed class TranslationWorker : IDisposable
     /// <summary>マージバッファに蓄積する最大エントリ数</summary>
     private const int MaxMergeCount = 10;
 
+    /// <summary>文が未完の場合のタイムアウト倍率 (通常マージウィンドウの N 倍)</summary>
+    private const int IncompleteSentenceTimeoutMultiplier = 8;
+
+    /// <summary>未完文待機の最低保証時間 (ms)。Whisper の処理が長い場合に対応。</summary>
+    private const int MinIncompleteSentenceTimeoutMs = 10_000;
+
     /// <summary>翻訳完了時に呼ばれるイベント (翻訳済み TranscriptEntry を引数に取る)</summary>
     public event Action<TranscriptEntry>? OnTranslated;
+
+    /// <summary>
+    /// 複数フラグメントが結合されたときに発火されるイベント。
+    /// 元のエントリリストと、結合後の新エントリを引数に取る。
+    /// UI やデータ側でフラグメントを統合するために使用。
+    /// </summary>
+    public event Action<IReadOnlyList<TranscriptEntry>, TranscriptEntry>? OnEntriesMerged;
 
     /// <summary>
     /// 翻訳ワーカーを初期化して開始する。
@@ -147,7 +160,20 @@ public sealed class TranslationWorker : IDisposable
 
                 try
                 {
-                    int timeout = buffer.Count > 0 ? _mergeWindowMs : Timeout.Infinite;
+                    int timeout;
+                    if (buffer.Count > 0)
+                    {
+                        // バッファ内のテキストが完結していない = 文の途中 → Whisper の処理時間を考慮して長めに待機
+                        bool incomplete = !IsBufferTextComplete(buffer[^1].Text);
+                        timeout = incomplete
+                            ? Math.Max(_mergeWindowMs * IncompleteSentenceTimeoutMultiplier,
+                                       MinIncompleteSentenceTimeoutMs)
+                            : _mergeWindowMs;
+                    }
+                    else
+                    {
+                        timeout = Timeout.Infinite;
+                    }
                     gotItem = _queue.TryTake(out request, timeout);
                 }
                 catch (OperationCanceledException)
@@ -164,9 +190,11 @@ public sealed class TranslationWorker : IDisposable
                 {
                     var entry = request.Entry;
 
-                    // 話者が変わった or バッファが満杯 → フラッシュ
+                    // 話者が変わった or バッファが満杯 or 前の文が完結済み → フラッシュ
                     if (buffer.Count > 0 &&
-                        (entry.Speaker != currentSpeaker || buffer.Count >= MaxMergeCount))
+                        (entry.Speaker != currentSpeaker
+                         || buffer.Count >= MaxMergeCount
+                         || IsBufferTextComplete(buffer[^1].Text)))
                     {
                         FlushBuffer(buffer);
                         buffer.Clear();
@@ -253,12 +281,19 @@ public sealed class TranslationWorker : IDisposable
         AppLogger.Debug($"結合翻訳: {buffer.Count}件のフラグメントを結合 " +
                         $"({merged.Length}文字 → {translated.Length}文字)");
 
-        // 翻訳を各エントリに分配
-        var parts = SplitTranslation(translated, buffer);
-        for (int i = 0; i < buffer.Count; i++)
+        // 結合エントリを作成: 最後のタイムスタンプを保持し、テキストを結合
+        var mergedEntry = buffer[^1] with { Text = merged, TranslatedText = translated };
+
+        if (OnEntriesMerged != null)
         {
-            var translatedEntry = buffer[i] with { TranslatedText = parts[i] };
-            OnTranslated?.Invoke(translatedEntry);
+            // 認識エントリ自体も統合する
+            var originals = buffer.ToList().AsReadOnly();
+            OnEntriesMerged.Invoke(originals, mergedEntry);
+        }
+        else
+        {
+            // イベントハンドラが未登録なら従来動作 (翻訳のみ通知)
+            OnTranslated?.Invoke(mergedEntry);
         }
     }
 
@@ -447,6 +482,64 @@ public sealed class TranslationWorker : IDisposable
             // ラテン文字系言語 (en, fr, de, es 等): CJK/ハングルが 30% 未満であるべき
             _ => (cjkRatio + hangulRatio) < 0.3,
         };
+    }
+
+    /// <summary>
+    /// バッファ内テキストが「翻訳に十分な完結度」を持つかを判定する。
+    /// 文末記号で終わっている場合だけでなく、文中に完結した文を含む場合も
+    /// 完結とみなす (Whisper が末尾の句読点を省略するケースに対応)。
+    /// </summary>
+    internal static bool IsBufferTextComplete(string text)
+    {
+        if (EndsWithSentenceBoundary(text)) return true;
+        return HasInternalSentenceBoundary(text);
+    }
+
+    /// <summary>
+    /// テキスト中に文末記号の後にさらにテキストが続くパターンがあるかを判定する。
+    /// 例: "Sure. I can talk about anything" → true ("." の後にテキストがある)
+    /// 例: "and you'll be able to see exactly" → false (句読点がない)
+    /// </summary>
+    internal static bool HasInternalSentenceBoundary(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+
+        for (int i = 0; i < text.Length - 1; i++)
+        {
+            if ("。！？.!?".IndexOf(text[i]) >= 0)
+            {
+                // 句読点の後に空白以外の文字があるか
+                for (int j = i + 1; j < text.Length; j++)
+                {
+                    if (!char.IsWhiteSpace(text[j]))
+                        return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// テキストが文末記号で終わっているかを判定する。
+    /// 文の途中で分割されたフラグメントを検出し、マージ待機を延長するために使用。
+    /// 英語 (.!?)、日本語 (。！？)、閉じ括弧 (」』）) などに対応。
+    /// </summary>
+    internal static bool EndsWithSentenceBoundary(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return true; // 空テキストは完了扱い
+
+        // 末尾の空白を除いた最後の文字を取得
+        for (int i = text.Length - 1; i >= 0; i--)
+        {
+            char c = text[i];
+            if (char.IsWhiteSpace(c)) continue;
+
+            // 文末記号: 英語/日本語/中国語の句読点、閉じ括弧類
+            return "。！？.!?」』）)…♪".IndexOf(c) >= 0;
+        }
+
+        return true;
     }
 
     public void Dispose()

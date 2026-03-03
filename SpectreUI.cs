@@ -102,6 +102,48 @@ internal sealed class SpectreUI
         }
     }
 
+    /// <summary>
+    /// 複数のフラグメントエントリを統合し、単一の結合エントリに置き換える (スレッドセーフ)。
+    /// 元のフラグメントを削除し、最後のフラグメント位置に結合エントリを配置する。
+    /// </summary>
+    public void MergeEntries(IReadOnlyList<TranscriptEntry> originalEntries, TranscriptEntry mergedEntry)
+    {
+        lock (_lock)
+        {
+            // 後ろから走査: 最初に見つかったマッチ (最後のフラグメント) を置換、
+            // それ以前のフラグメントは削除
+            bool replaced = false;
+            for (int i = _entries.Count - 1; i >= 0; i--)
+            {
+                var e = _entries[i];
+                bool isOriginal = false;
+                foreach (var orig in originalEntries)
+                {
+                    if (orig.Timestamp == e.Timestamp
+                        && orig.Speaker == e.Speaker
+                        && orig.Text == e.Text)
+                    {
+                        isOriginal = true;
+                        break;
+                    }
+                }
+
+                if (isOriginal)
+                {
+                    if (!replaced)
+                    {
+                        _entries[i] = mergedEntry;
+                        replaced = true;
+                    }
+                    else
+                    {
+                        _entries.RemoveAt(i);
+                    }
+                }
+            }
+        }
+    }
+
     /// <summary>処理中状態を設定する (スレッドセーフ)</summary>
     public void SetProcessing(string speaker, double durationSec)
     {

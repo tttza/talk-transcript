@@ -405,16 +405,17 @@ public sealed class MarianTranslator : ITranslator
     }
 
     /// <summary>トークン ID 列をテキストにデコードする</summary>
-    private static string Detokenize(List<int> tokenIds, Dictionary<int, string> revVocab)
+    private string Detokenize(List<int> tokenIds, Dictionary<int, string> revVocab)
     {
         var sb = new System.Text.StringBuilder();
         foreach (int id in tokenIds)
         {
+            if (id == _unkId) continue; // <unk> トークンをスキップ
             if (revVocab.TryGetValue(id, out string? piece))
                 sb.Append(piece);
         }
-        // ▁ をスペースに戻し、先頭のスペースを除去
-        return sb.ToString().Replace("▁", " ").TrimStart();
+        // ◁ をスペースに戻し、先頭のスペースを除去、残存 <unk> を除去
+        return sb.ToString().Replace("▁", " ").Replace("<unk>", "").TrimStart();
     }
 
     /// <summary>    /// logits の指定位置から Log-Softmax を計算し、Top-K の (tokenId, logProb) を返す。
@@ -446,6 +447,7 @@ public sealed class MarianTranslator : ITranslator
         for (int v = 0; v < vocabSize; v++)
         {
             if (v == _decoderStartId) continue;
+            if (v == _unkId) continue; // <unk> トークンを生成候補から除外
             float logProb = logits[batchIdx, seqPos, v] - logZ;
             if (logProb > topK[k - 1].logProb)
             {

@@ -534,6 +534,47 @@ while (!quit)
                 }
             }
         };
+
+        // ── フラグメント結合コールバック ──
+        translationWorker.OnEntriesMerged += (originalEntries, mergedEntry) =>
+        {
+            // UI のフラグメントを統合エントリに置換
+            ui.MergeEntries(originalEntries, mergedEntry);
+
+            // テキストファイルに結合翻訳を追記
+            try { writer?.AppendTranslation(mergedEntry); }
+            catch (Exception ex) { AppLogger.Error("結合翻訳テキスト書き出しエラー", ex); }
+
+            // allEntries のフラグメントを統合: 元エントリを削除し、結合エントリを保持
+            bool kept = false;
+            foreach (var kv in allEntries)
+            {
+                bool isOriginal = false;
+                foreach (var orig in originalEntries)
+                {
+                    if (kv.Value.Timestamp == orig.Timestamp
+                        && kv.Value.Speaker == orig.Speaker
+                        && kv.Value.Text == orig.Text)
+                    {
+                        isOriginal = true;
+                        break;
+                    }
+                }
+
+                if (isOriginal)
+                {
+                    if (!kept)
+                    {
+                        allEntries.TryUpdate(kv.Key, mergedEntry, kv.Value);
+                        kept = true;
+                    }
+                    else
+                    {
+                        allEntries.TryRemove(kv.Key, out _);
+                    }
+                }
+            }
+        };
     }
 
     // ── 音量通知 (#2) ──
