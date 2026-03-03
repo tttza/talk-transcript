@@ -92,6 +92,18 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     private readonly AdaptiveNoiseGate _micNoiseGate = new();
     private readonly AdaptiveNoiseGate _spkNoiseGate = new();
 
+    // ── VAD イベント駆動 ──
+    private readonly ManualResetEventSlim _micVadSignal = new(false);
+    private readonly ManualResetEventSlim _spkVadSignal = new();
+
+    // ── Whisper プロセッサキャッシュ (毎チャンク再構築を回避) ──
+    private WhisperProcessor? _cachedMicProcessor;
+    private WhisperProcessor? _cachedSpkProcessor;
+    private string _cachedMicPrompt = "";
+    private string _cachedSpkPrompt = "";
+    private readonly object _micProcessorLock = new();
+    private readonly object _spkProcessorLock = new();
+
     // ── 自動ゲイン制御 (AGC) ──
     private readonly AutoGainControl _micAgc;
     private readonly AutoGainControl _spkAgc;
@@ -287,6 +299,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
         // VAD: 音声がある時刻を記録
         Interlocked.Exchange(ref _micLastVoiceTicks, DateTime.UtcNow.Ticks);
+        _micVadSignal.Set(); // VAD ポーリングスレッドを起床させる
 
         // 認識用バッファに追加 (バックプレッシャー: 上限超過時は古いデータを破棄)
         lock (_micBufLock)
@@ -354,6 +367,7 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
 
         // VAD: 音声がある時刻を記録
         Interlocked.Exchange(ref _spkLastVoiceTicks, DateTime.UtcNow.Ticks);
+        _spkVadSignal.Set(); // VAD ポーリングスレッドを起床させる
 
         // 認識用バッファに追加 (バックプレッシャー: 上限超過時は古いデータを破棄)
         lock (_spkBufLock)
@@ -382,12 +396,12 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
     private void MicProcessLoop() => VadProcessLoop("自分", _micBufLock, _micBuffer,
         () => new DateTime(Interlocked.Read(ref _micLastVoiceTicks)), () => _micLastPrompt, p => _micLastPrompt = p,
         () => _micLastText, t => _micLastText = t, _micEnergyHistory, _micBackpressure,
-        () => _micOverlap, o => _micOverlap = o);
+        () => _micOverlap, o => _micOverlap = o, _micVadSignal);
 
     private void SpkProcessLoop() => VadProcessLoop("相手", _spkBufLock, _speakerBuffer,
         () => new DateTime(Interlocked.Read(ref _spkLastVoiceTicks)), () => _spkLastPrompt, p => _spkLastPrompt = p,
         () => _spkLastText, t => _spkLastText = t, _spkEnergyHistory, _spkBackpressure,
-        () => _spkOverlap, o => _spkOverlap = o);
+        () => _spkOverlap, o => _spkOverlap = o, _spkVadSignal);
 
     /// <summary>
     /// VAD ベースの認識ループ。
@@ -407,14 +421,17 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
         Queue<float> energyHistory,
         BackpressureMonitor backpressure,
         Func<byte[]?> getOverlap,
-        Action<byte[]?> setOverlap)
+        Action<byte[]?> setOverlap,
+        ManualResetEventSlim vadSignal)
     {
       try
       {
         bool firstChunk = true;
         while (!_stopping)
         {
-            Thread.Sleep(200); // ポーリング間隔
+            // イベント駆動: 音声データ到着またはタイムアウト (200ms) で起床
+            vadSignal.Wait(200);
+            vadSignal.Reset();
 
             // バックプレッシャーで動的に調整されるバッファサイズ
             int minBytes = (int)(TargetFormat.SampleRate * 2 * backpressure.CurrentMinBufferSec);
@@ -436,10 +453,14 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
                 bool silenceDetected = lastVoice != DateTime.MinValue && silenceMs >= SilenceTimeoutMs;
                 bool maxReached = buffer.Length >= maxBytes;
 
-                // エネルギー履歴で無音判定を補強
+                // エネルギー履歴で無音判定を補強 (LINQ なしの手動平均計算)
                 float avgEnergy = 0f;
                 if (energyHistory.Count > 0)
-                    avgEnergy = energyHistory.Average();
+                {
+                    float sum = 0f;
+                    foreach (var e in energyHistory) sum += e;
+                    avgEnergy = sum / energyHistory.Count;
+                }
                 bool energySilence = avgEnergy < VadEnergyThreshold && energyHistory.Count >= 3;
 
                 // 通常: バッファ >= 最小長 かつ (無音検出 or 最大到達)
@@ -558,6 +579,52 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
       }
     }
 
+    /// <summary>
+    /// speaker に対応するキャッシュ済み WhisperProcessor を取得する。
+    /// prompt が変わった場合のみ再構築し、それ以外は既存プロセッサを再利用する。
+    /// </summary>
+    private WhisperProcessor GetOrCreateProcessor(string speaker, string prompt)
+    {
+        bool isMic = speaker == "自分";
+        ref WhisperProcessor? cached = ref (isMic ? ref _cachedMicProcessor : ref _cachedSpkProcessor);
+        ref string cachedPrompt = ref (isMic ? ref _cachedMicPrompt : ref _cachedSpkPrompt);
+        object processorLock = isMic ? _micProcessorLock : _spkProcessorLock;
+
+        lock (processorLock)
+        {
+            if (cached != null && cachedPrompt == prompt)
+                return cached;
+
+            cached?.Dispose();
+
+            int whisperThreads = _maxCpuThreads > 0
+                ? Math.Min(_maxCpuThreads, Math.Max(1, Environment.ProcessorCount - 2))
+                : Math.Max(1, Environment.ProcessorCount - 4);
+
+            var beamStrategy = (BeamSearchSamplingStrategyBuilder)_factory.CreateBuilder()
+                .WithBeamSearchSamplingStrategy();
+            var builder = beamStrategy
+                .WithBeamSize(5)
+                .WithPatience(1.0f)
+                .ParentBuilder
+                .WithLanguage(_language)
+                .WithThreads(whisperThreads)
+                .WithTemperature(0f)
+                .WithTemperatureInc(0.2f)
+                .WithEntropyThreshold(2.4f)
+                .WithLogProbThreshold(-1.0f)
+                .WithNoSpeechThreshold(0.6f)
+                .WithCarryInitialPrompt(true);
+
+            if (!string.IsNullOrEmpty(prompt))
+                builder = builder.WithPrompt(prompt);
+
+            cached = builder.Build();
+            cachedPrompt = prompt;
+            return cached;
+        }
+    }
+
     /// <summary>PCM 16bit チャンクを Whisper で認識する。(全テキスト, 最終セグメントテキスト) を返す。</summary>
     private (string AllText, string LastSegment) ProcessChunk(byte[] pcm16, string speaker, string prompt, string lastText)
     {
@@ -575,37 +642,8 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             List<(TimeSpan Start, TimeSpan End, string Text)> results;
             try
             {
-                // Whisper 推論スレッド数を決定:
-                // _maxCpuThreads > 0 ならユーザー指定値を使用、
-                // 0 ならオーディオスレッド用に4コアを確保し残りを割り当て
-                int whisperThreads = _maxCpuThreads > 0
-                    ? Math.Min(_maxCpuThreads, Math.Max(1, Environment.ProcessorCount - 2))
-                    : Math.Max(1, Environment.ProcessorCount - 4);
-
-                // ── ビームサーチデコーディング (greedy → beam search で精度向上) ──
-                var beamStrategy = (BeamSearchSamplingStrategyBuilder)_factory.CreateBuilder()
-                    .WithBeamSearchSamplingStrategy();
-                var builder = beamStrategy
-                    .WithBeamSize(5)
-                    .WithPatience(1.0f)
-                    .ParentBuilder
-                    .WithLanguage(_language)
-                    .WithThreads(whisperThreads)
-                    // ── Temperature 0 (決定論的) + フォールバック ──
-                    .WithTemperature(0f)
-                    .WithTemperatureInc(0.2f)
-                    // ── 品質フィルタ閾値 ──
-                    .WithEntropyThreshold(2.4f)
-                    .WithLogProbThreshold(-1.0f)
-                    .WithNoSpeechThreshold(0.6f)
-                    // ── チャンク内セグメント間のプロンプト引き継ぎ ──
-                    .WithCarryInitialPrompt(true);
-
-                // 前回の認識結果を prompt として渡し、文脈を維持
-                if (!string.IsNullOrEmpty(prompt))
-                    builder = builder.WithPrompt(prompt);
-
-                using var processor = builder.Build();
+                // キャッシュ済み WhisperProcessor を再利用 (prompt 変更時のみ再構築)
+                var processor = GetOrCreateProcessor(speaker, prompt);
 
                 using var wavStream = new MemoryStream();
                 AudioProcessing.WriteWavPcm16(wavStream, pcm16, TargetFormat.SampleRate);
@@ -762,6 +800,14 @@ public sealed class WhisperCallTranscriber : ICallTranscriber
             _spkProcessThread.Join(TimeSpan.FromSeconds(10));
 
         _factory.Dispose();
+
+        // キャッシュ済み WhisperProcessor を解放
+        _cachedMicProcessor?.Dispose();
+        _cachedSpkProcessor?.Dispose();
+
+        // VAD イベントシグナルを解放
+        _micVadSignal.Dispose();
+        _spkVadSignal.Dispose();
 
         // 認識バッファを確実に解放
         _micBuffer.SetLength(0);

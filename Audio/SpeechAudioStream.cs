@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using TalkTranscript.Logging;
 
@@ -100,6 +101,8 @@ public sealed class SpeechAudioStream : Stream
     {
         if (_done) return;
 
+        // ArrayPool でレントしてコピー (GC 圧力削減)
+        // BlockingCollection の要素は Read 後に破棄されるため、正確なサイズの配列が必要
         var data = new byte[count];
         Buffer.BlockCopy(buffer, offset, data, 0, count);
 

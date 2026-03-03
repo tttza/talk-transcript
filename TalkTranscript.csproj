@@ -15,6 +15,11 @@
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
 
+    <!-- ── パフォーマンス最適化 ── -->
+    <ReadyToRun>true</ReadyToRun>
+    <TieredPGO>true</TieredPGO>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+
     <!-- トリミングで無効化される機能を保持 -->
     <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>

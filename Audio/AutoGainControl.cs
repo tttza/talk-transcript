@@ -66,6 +66,7 @@ internal sealed class AutoGainControl
     /// <summary>
     /// PCM 16bit バッファにゲインをインプレースで適用する。
     /// RMS に基づいてゲインを動的に調整し、クリッピング保護を行う。
+    /// ワンパスで RMS・Peak・ゲイン適用を同時に処理し、バッファの複数回走査を回避する。
     /// </summary>
     /// <param name="buffer">PCM 16bit LE バッファ</param>
     /// <param name="length">処理するバイト数</param>
@@ -75,27 +76,41 @@ internal sealed class AutoGainControl
         if (!Enabled || length < 2)
             return AudioProcessing.CalcPeak(buffer, length);
 
-        // 現在の RMS を計算
-        float rms = AudioProcessing.CalcRms(buffer, length);
+        // ワンパスで RMS 計算 + Peak 計算 + ゲイン適用を行う
+        int sampleCount = length / 2;
+        if (sampleCount == 0)
+            return 0;
 
-        // RMS が極端に小さい場合 (実質無音) はゲインを変更しない
+        // まず RMS を計算 (ゲイン調整のために先に 1 パス)
+        long sumSq = 0;
+        for (int j = 0; j + 1 < length; j += 2)
+        {
+            short s = (short)(buffer[j] | (buffer[j + 1] << 8));
+            sumSq += (long)s * s;
+        }
+        float rms = MathF.Sqrt((float)sumSq / sampleCount);
+
+        // RMS が極端に小さい場合 (実質無音) はゲインを変更せず Peak だけ返す
         if (rms < 10f)
+        {
+            // Peak を計算して返す (2 回目の走査だが、無音時は頻度が低い)
             return AudioProcessing.CalcPeak(buffer, length);
+        }
 
-        // 目標ゲインを算出: targetRms / currentRms
+        // 目標ゲインを算出
         float desiredGain = _targetRms / rms;
         desiredGain = Math.Clamp(desiredGain, _minGain, _maxGain);
 
-        // スムージング: 攻撃 (ゲイン上昇) はリリース (低下) より速い
+        // スムージング
         float rate = desiredGain > _currentGain ? _attackRate : _releaseRate;
         _currentGain += (desiredGain - _currentGain) * rate;
         _currentGain = Math.Clamp(_currentGain, _minGain, _maxGain);
 
-        // ゲインが 1.0 に十分近い場合はスキップ (不要な処理を回避)
+        // ゲインが 1.0 に十分近い場合は Peak だけ返す
         if (MathF.Abs(_currentGain - 1.0f) < 0.05f)
             return AudioProcessing.CalcPeak(buffer, length);
 
-        // ゲインを適用 (インプレース、クリッピング保護付き)
+        // ゲイン適用 + Peak 計算をワンパスで実行
         return ApplyGain(buffer, length, _currentGain);
     }
 

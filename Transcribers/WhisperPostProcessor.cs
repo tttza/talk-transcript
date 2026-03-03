@@ -43,23 +43,30 @@ public static class WhisperPostProcessor
 
         using var factory = WhisperFactory.FromPath(whisperModelPath, new WhisperFactoryOptions { UseGpu = useGpu });
 
-        // マイク音声の処理
-        if (micPcm.Length > 0)
-        {
-            Console.WriteLine($"[Whisper] マイク音声を処理中 ({micPcm.Length / 1024}KB)...");
-            var micEntries = await ProcessSingleAsync(factory, micPcm, "自分", callStartTime, language, maxCpuThreads);
-            entries.AddRange(micEntries);
-            Console.WriteLine($"[Whisper] マイク: {micEntries.Count} セグメント認識");
-        }
+        // マイクとスピーカーを並列処理 (Task.WhenAll で後処理時間を最大 50% 短縮)
+        var micTask = micPcm.Length > 0
+            ? Task.Run(async () =>
+            {
+                Console.WriteLine($"[Whisper] マイク音声を処理中 ({micPcm.Length / 1024}KB)...");
+                var micEntries = await ProcessSingleAsync(factory, micPcm, "自分", callStartTime, language, maxCpuThreads);
+                Console.WriteLine($"[Whisper] マイク: {micEntries.Count} セグメント認識");
+                return micEntries;
+            })
+            : Task.FromResult(new List<TranscriptEntry>());
 
-        // スピーカー音声の処理
-        if (speakerPcm.Length > 0)
-        {
-            Console.WriteLine($"[Whisper] スピーカー音声を処理中 ({speakerPcm.Length / 1024}KB)...");
-            var spkEntries = await ProcessSingleAsync(factory, speakerPcm, "相手", callStartTime, language, maxCpuThreads);
-            entries.AddRange(spkEntries);
-            Console.WriteLine($"[Whisper] スピーカー: {spkEntries.Count} セグメント認識");
-        }
+        var spkTask = speakerPcm.Length > 0
+            ? Task.Run(async () =>
+            {
+                Console.WriteLine($"[Whisper] スピーカー音声を処理中 ({speakerPcm.Length / 1024}KB)...");
+                var spkEntries = await ProcessSingleAsync(factory, speakerPcm, "相手", callStartTime, language, maxCpuThreads);
+                Console.WriteLine($"[Whisper] スピーカー: {spkEntries.Count} セグメント認識");
+                return spkEntries;
+            })
+            : Task.FromResult(new List<TranscriptEntry>());
+
+        await Task.WhenAll(micTask, spkTask);
+        entries.AddRange(micTask.Result);
+        entries.AddRange(spkTask.Result);
 
         // タイムスタンプ順にソート
         entries.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));

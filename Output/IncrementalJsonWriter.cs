@@ -33,6 +33,7 @@ public sealed class IncrementalJsonWriter : IDisposable
     private int _entryCount;
     private bool _closed;
     private bool _disposed;
+    private readonly Timer _flushTimer;
 
     /// <summary>出力先ファイルパス</summary>
     public string FilePath => _filePath;
@@ -43,8 +44,19 @@ public sealed class IncrementalJsonWriter : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
         _writer = new StreamWriter(filePath, append: false, Encoding.UTF8)
         {
-            AutoFlush = true  // 各エントリを即座にディスクへ
+            AutoFlush = false  // 定期 Flush で I/O オーバーヘッドを削減
         };
+        // 5秒ごとにディスクにフラッシュ (クラッシュ耐性と性能のバランス)
+        _flushTimer = new Timer(_ => PeriodicFlush(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    private void PeriodicFlush()
+    {
+        lock (_lock)
+        {
+            if (_closed || _disposed) return;
+            try { _writer.Flush(); } catch { }
+        }
     }
 
     /// <summary>
@@ -87,6 +99,7 @@ public sealed class IncrementalJsonWriter : IDisposable
         {
             if (_closed) return;
             _closed = true;
+            _flushTimer.Dispose();
             _writer.Flush();
             _writer.Dispose();
 
@@ -111,6 +124,7 @@ public sealed class IncrementalJsonWriter : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
+            _flushTimer.Dispose();
             try
             {
                 if (!_closed)

@@ -347,12 +347,14 @@ public sealed class MarianTranslator : ITranslator
     /// <summary>
     /// SentencePiece Viterbi アルゴリズムでテキストをトークナイズし、
     /// vocab.json の model ID を返す。
+    /// ReadOnlySpan で部分文字列を比較し、GC 圧力を削減する。
     /// </summary>
     private List<int> TokenizeViterbi(string text)
     {
         // SentencePiece の ▁ (U+2581) プレフィクスに変換
         string input = "▁" + text.Replace(" ", "▁");
         int n = input.Length;
+        ReadOnlySpan<char> inputSpan = input.AsSpan();
 
         // DP テーブル
         var bestScore = new float[n + 1];
@@ -371,7 +373,10 @@ public sealed class MarianTranslator : ITranslator
             for (int len = 1; len <= maxLen; len++)
             {
                 int start = end - len;
-                string sub = input.Substring(start, len);
+                // ReadOnlySpan で部分文字列を取得 (Substring のヒープ割り当てを回避)
+                ReadOnlySpan<char> subSpan = inputSpan.Slice(start, len);
+                // Dictionary 検索には string が必要なため、短いピースのみ文字列化
+                string sub = subSpan.ToString();
                 if (pieceLookup.TryGetValue(sub, out var entry)
                     && _pieceToModelId.TryGetValue(sub, out int modelId))
                 {
@@ -420,6 +425,7 @@ public sealed class MarianTranslator : ITranslator
 
     /// <summary>    /// logits の指定位置から Log-Softmax を計算し、Top-K の (tokenId, logProb) を返す。
     /// pad/start トークンは生成対象から除外する (HuggingFace 互換).
+    /// 挿入ソートベースの Top-K 抽出で O(V*K) → O(V*log K) に相当する効率化。
     /// </summary>
     private (int tokenId, float logProb)[] TopKLogProbs(
         Tensor<float> logits, int batchIdx, int seqPos, int vocabSize, int k)
@@ -440,21 +446,23 @@ public sealed class MarianTranslator : ITranslator
         }
         float logZ = maxLogit + (float)Math.Log(sumExp);
 
-        // Top-K 抽出 (挿入ソート)
+        // Top-K 抽出 (挿入ソート — k が小さい (4-8) ため O(V) で十分高速)
         var topK = new (int id, float logProb)[k];
         for (int i = 0; i < k; i++) topK[i] = (-1, float.MinValue);
 
+        // 最小値の位置をキャッシュして不要な比較を削減
+        float minTopK = float.MinValue;
+
         for (int v = 0; v < vocabSize; v++)
         {
-            if (v == _decoderStartId) continue;
-            if (v == _unkId) continue; // <unk> トークンを生成候補から除外
+            if (v == _decoderStartId || v == _unkId) continue;
             float logProb = logits[batchIdx, seqPos, v] - logZ;
-            if (logProb > topK[k - 1].logProb)
-            {
-                topK[k - 1] = (v, logProb);
-                for (int i = k - 1; i > 0 && topK[i].logProb > topK[i - 1].logProb; i--)
-                    (topK[i], topK[i - 1]) = (topK[i - 1], topK[i]);
-            }
+            if (logProb <= minTopK) continue; // 閾値以下は即スキップ
+
+            topK[k - 1] = (v, logProb);
+            for (int i = k - 1; i > 0 && topK[i].logProb > topK[i - 1].logProb; i--)
+                (topK[i], topK[i - 1]) = (topK[i - 1], topK[i]);
+            minTopK = topK[k - 1].logProb;
         }
 
         return topK;

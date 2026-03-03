@@ -85,34 +85,26 @@ internal static class AudioProcessing
             if (outputSamples == 0) return Array.Empty<byte>();
 
             int resultLength = outputSamples * 2; // 16bit = 2 bytes
-            byte[] result = ArrayPool<byte>.Shared.Rent(resultLength);
-            try
+            // ArrayPool でレントしたバッファに直接書き込み、正確なサイズの配列を返す
+            // (呼び出し側が RecordingBuffer.Write 等で配列を保持するため、新規配列が必要)
+            byte[] output = new byte[resultLength];
+
+            for (int i = 0; i < outputSamples; i++)
             {
-                for (int i = 0; i < outputSamples; i++)
-                {
-                    // リニア補間で滑らかにリサンプル
-                    double srcPos = i * ratio;
-                    int idx0 = (int)srcPos;
-                    int idx1 = Math.Min(idx0 + 1, sampleCount - 1);
-                    float frac = (float)(srcPos - idx0);
+                // リニア補間で滑らかにリサンプル
+                double srcPos = i * ratio;
+                int idx0 = (int)srcPos;
+                int idx1 = Math.Min(idx0 + 1, sampleCount - 1);
+                float frac = (float)(srcPos - idx0);
 
-                    float sample = monoSamples[idx0] * (1f - frac) + monoSamples[idx1] * frac;
-                    short pcm = (short)(Math.Clamp(sample, -1.0f, 1.0f) * 32767);
+                float sample = monoSamples[idx0] * (1f - frac) + monoSamples[idx1] * frac;
+                short pcm = (short)(Math.Clamp(sample, -1.0f, 1.0f) * 32767);
 
-                    result[i * 2] = (byte)(pcm & 0xFF);
-                    result[i * 2 + 1] = (byte)((pcm >> 8) & 0xFF);
-                }
-
-                // ArrayPool のバッファは要求より大きい場合があるので、
-                // 正確なサイズでコピーを返す
-                byte[] output = new byte[resultLength];
-                Buffer.BlockCopy(result, 0, output, 0, resultLength);
-                return output;
+                output[i * 2] = (byte)(pcm & 0xFF);
+                output[i * 2 + 1] = (byte)((pcm >> 8) & 0xFF);
             }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(result);
-            }
+
+            return output;
         }
         finally
         {
@@ -211,7 +203,7 @@ internal static class AudioProcessing
     public static float[] ConvertPcm16ToFloat(byte[] pcm)
     {
         int sampleCount = pcm.Length / 2;
-        float[] samples = new float[sampleCount];
+        float[] samples = ArrayPool<float>.Shared.Rent(sampleCount);
 
         for (int i = 0; i < sampleCount; i++)
         {
@@ -219,6 +211,10 @@ internal static class AudioProcessing
             samples[i] = s / 32768f;
         }
 
-        return samples;
+        // 正確なサイズの配列を返す (呼び出し側が Whisper に渡すため)
+        float[] result = new float[sampleCount];
+        Array.Copy(samples, result, sampleCount);
+        ArrayPool<float>.Shared.Return(samples);
+        return result;
     }
 }

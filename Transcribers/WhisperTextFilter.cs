@@ -88,6 +88,14 @@ internal static class WhisperTextFilter
         return false;
     }
 
+    // ── 比較用正規化の事前コンパイル済み Regex ──
+    private static readonly Regex ComparisonNormalizePattern = new(
+        @"[\s。、，．！？!?,\.\-ー]", RegexOptions.Compiled);
+
+    // ── 連続空白正規化の事前コンパイル済み Regex ──
+    private static readonly Regex MultiSpacePattern = new(
+        @"\s{2,}", RegexOptions.Compiled);
+
     /// <summary>
     /// 前回の認識結果と比較して重複かどうかを判定する。
     /// Whisper は同じ音声区間を複数回処理すると同一テキストを返すことがある。
@@ -138,8 +146,8 @@ internal static class WhisperTextFilter
         // 全角スペースを半角に
         result = result.Replace('　', ' ');
 
-        // 連続する空白を1つに
-        result = Regex.Replace(result, @"\s{2,}", " ");
+        // 連続する空白を1つに (コンパイル済み Regex を使用)
+        result = MultiSpacePattern.Replace(result, " ");
 
         // 日本語文字間のスペースを除去 (Whisper が形態素間に挿入するスペース対策)
         result = JapaneseInterCharSpacePattern.Replace(result, "");
@@ -156,13 +164,13 @@ internal static class WhisperTextFilter
     private static string NormalizeForComparison(string text)
     {
         string s = text.Trim();
-        // 空白・句読点を除去して比較
-        s = Regex.Replace(s, @"[\s。、，．！？!?,.\-ー]", "");
+        // 空白・句読点を除去して比較 (コンパイル済み Regex を使用)
+        s = ComparisonNormalizePattern.Replace(s, "");
         return s;
     }
 
     /// <summary>
-    /// レーベンシュタイン距離を計算する (2行DP)。
+    /// レーベンシュタイン距離を計算する (2行DP, stackalloc でヒープ割当て回避)。
     /// </summary>
     private static int LevenshteinDistance(string s, string t)
     {
@@ -170,8 +178,13 @@ internal static class WhisperTextFilter
         if (n == 0) return m;
         if (m == 0) return n;
 
-        var prev = new int[m + 1];
-        var curr = new int[m + 1];
+        // 小さいサイズ (512以下) は stackalloc でスタック上に確保
+        const int StackAllocThreshold = 512;
+        int arraySize = m + 1;
+        bool useStack = arraySize <= StackAllocThreshold;
+
+        Span<int> prev = useStack ? stackalloc int[arraySize] : new int[arraySize];
+        Span<int> curr = useStack ? stackalloc int[arraySize] : new int[arraySize];
 
         for (int j = 0; j <= m; j++) prev[j] = j;
 
@@ -183,7 +196,10 @@ internal static class WhisperTextFilter
                 int cost = s[i - 1] == t[j - 1] ? 0 : 1;
                 curr[j] = Math.Min(Math.Min(curr[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
             }
-            (prev, curr) = (curr, prev);
+            // Span のスワップ (stackalloc ではタプルスワップが使えないので要素コピー)
+            var tmp = prev;
+            prev = curr;
+            curr = tmp;
         }
 
         return prev[m];
