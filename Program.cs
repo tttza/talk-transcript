@@ -124,29 +124,37 @@ else
 /// </summary>
 static GpuBackend ResolveGpuBackend(GpuBackend requested, HardwareInfo.EnvironmentProfile hw)
 {
+    GpuBackend result;
     switch (requested)
     {
         case GpuBackend.Cuda:
-            if (CudaHelper.IsCudaAvailable()) return GpuBackend.Cuda;
+            if (CudaHelper.IsCudaAvailable()) { result = GpuBackend.Cuda; break; }
             // CUDA が使えない場合、Vulkan にフォールバック
-            if (VulkanHelper.IsVulkanAvailable()) return GpuBackend.Vulkan;
-            return GpuBackend.None;
+            if (VulkanHelper.IsVulkanAvailable()) { result = GpuBackend.Vulkan; break; }
+            result = GpuBackend.None;
+            break;
 
         case GpuBackend.Vulkan:
-            if (VulkanHelper.IsVulkanAvailable()) return GpuBackend.Vulkan;
-            return GpuBackend.None;
+            if (VulkanHelper.IsVulkanAvailable()) { result = GpuBackend.Vulkan; break; }
+            result = GpuBackend.None;
+            break;
 
         case GpuBackend.Auto:
             // NVIDIA GPU → CUDA 優先
-            if (hw.HasNvidiaGpu && CudaHelper.IsCudaAvailable()) return GpuBackend.Cuda;
+            if (hw.HasNvidiaGpu && CudaHelper.IsCudaAvailable()) { result = GpuBackend.Cuda; break; }
             // Vulkan は AMD / Intel / NVIDIA (CUDA なし) で使える
             if ((hw.HasNvidiaGpu || hw.HasAmdGpu || hw.HasIntelGpu) && VulkanHelper.IsVulkanAvailable())
-                return GpuBackend.Vulkan;
-            return GpuBackend.None;
+            { result = GpuBackend.Vulkan; break; }
+            result = GpuBackend.None;
+            break;
 
         default:
-            return GpuBackend.None;
+            result = GpuBackend.None;
+            break;
     }
+
+    AppLogger.Debug($"ResolveGpuBackend: requested={requested}, nvidia={hw.HasNvidiaGpu}, cuda={CudaHelper.IsCudaAvailable()}, vulkan={VulkanHelper.IsVulkanAvailable()} → {result}");
+    return result;
 }
 
 // ── 診断モード ──
@@ -679,8 +687,10 @@ while (!quit)
             {
                 engineName = (settings.EngineName ?? hwProfile.RecommendedEngine).ToLowerInvariant();
                 gpuBackend = settings.EngineName != null ? settings.EffectiveGpuBackend : hwProfile.RecommendedGpuBackend;
+                AppLogger.Debug($"config 後 GPU 再解決: engine={engineName}, gpuBackend={gpuBackend}");
                 resolvedBackend = ResolveGpuBackend(gpuBackend, hwProfile);
                 useGpu = resolvedBackend != GpuBackend.None;
+                AppLogger.Info($"config 後 GPU: resolved={resolvedBackend}, useGpu={useGpu}");
 
                 // GPU バックエンドが変更された場合、ランタイムを再セットアップ
                 if (resolvedBackend == GpuBackend.Cuda)

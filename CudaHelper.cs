@@ -12,17 +12,39 @@ internal static class CudaHelper
     /// <summary>検出された CUDA バージョン (12 or 13、未検出は 0)</summary>
     public static int DetectedCudaMajor { get; private set; }
 
+    /// <summary>キャッシュ済み CUDA 利用可否 (プロセス中に変化しないため初回結果を保持)</summary>
+    private static bool? _cachedAvailable;
+
     /// <summary>
     /// CUDA DLL (runtimes/cuda/win-x64/) と CUDA Toolkit (cublas64_12/13.dll) が
-    /// 利用可能かチェック。
+    /// 利用可能かチェック。結果はプロセス存続中キャッシュされる。
     /// </summary>
     public static bool IsCudaAvailable()
     {
+        if (_cachedAvailable.HasValue)
+            return _cachedAvailable.Value;
+
         var exeDir = AppContext.BaseDirectory;
         var cudaDir = Path.Combine(exeDir, "runtimes", "cuda", "win-x64");
-        if (!File.Exists(Path.Combine(cudaDir, "ggml-cuda-whisper.dll")))
+        var dllPath = Path.Combine(cudaDir, "ggml-cuda-whisper.dll");
+        if (!File.Exists(dllPath))
+        {
+            AppLogger.Debug($"CUDA 不可: {dllPath} が見つかりません");
+            _cachedAvailable = false;
             return false;
-        return FindCudaToolkitBinDir() != null;
+        }
+
+        var toolkitDir = FindCudaToolkitBinDir();
+        if (toolkitDir == null)
+        {
+            AppLogger.Debug("CUDA 不可: CUDA Toolkit (cublas64) が見つかりません");
+            _cachedAvailable = false;
+            return false;
+        }
+
+        AppLogger.Debug($"CUDA 利用可能: toolkit={toolkitDir}, CUDA {DetectedCudaMajor}");
+        _cachedAvailable = true;
+        return true;
     }
 
     /// <summary>

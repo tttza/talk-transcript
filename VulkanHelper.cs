@@ -10,13 +10,19 @@ namespace TalkTranscript;
 /// </summary>
 internal static class VulkanHelper
 {
+    /// <summary>キャッシュ済み Vulkan 利用可否</summary>
+    private static bool? _cachedAvailable;
+
     /// <summary>
     /// Vulkan ランタイム DLL (runtimes/vulkan/win-x64/ または直下) が
-    /// 利用可能かチェック。
+    /// 利用可能かチェック。結果はプロセス存続中キャッシュされる。
     /// </summary>
     public static bool IsVulkanAvailable()
     {
-        return FindVulkanDll() != null;
+        if (_cachedAvailable.HasValue)
+            return _cachedAvailable.Value;
+        _cachedAvailable = FindVulkanDll() != null;
+        return _cachedAvailable.Value;
     }
 
     /// <summary>ggml-vulkan-whisper.dll のパスを検索する</summary>
