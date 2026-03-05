@@ -10,22 +10,35 @@ namespace TalkTranscript;
 /// </summary>
 internal static class VulkanHelper
 {
-    /// <summary>キャッシュ済み Vulkan 利用可否</summary>
-    private static bool? _cachedAvailable;
+    /// <summary>成功結果のみキャッシュ (失敗は一時的な可能性があるためキャッシュしない)</summary>
+    private static bool _confirmedAvailable;
+
+    /// <summary>リトライ回数</summary>
+    private const int MaxRetries = 3;
+
+    /// <summary>リトライ間隔 (ms)</summary>
+    private const int RetryDelayMs = 200;
 
     /// <summary>
     /// Vulkan ランタイム DLL (runtimes/vulkan/win-x64/ または直下) が
-    /// 利用可能かチェック。結果はプロセス存続中キャッシュされる。
+    /// 利用可能かチェック。成功結果はプロセス存続中キャッシュされる。
+    /// 失敗時はキャッシュせず、次回呼び出し時にリトライする。
     /// </summary>
     public static bool IsVulkanAvailable()
     {
-        if (_cachedAvailable.HasValue)
-            return _cachedAvailable.Value;
-        _cachedAvailable = FindVulkanDll() != null;
-        return _cachedAvailable.Value;
+        if (_confirmedAvailable)
+            return true;
+
+        var dir = FindVulkanDll();
+        if (dir != null)
+        {
+            _confirmedAvailable = true;
+            return true;
+        }
+        return false; // キャッシュしない → 次回リトライ
     }
 
-    /// <summary>ggml-vulkan-whisper.dll のパスを検索する</summary>
+    /// <summary>ggml-vulkan-whisper.dll のパスを検索する (リトライ付き)</summary>
     private static string? FindVulkanDll()
     {
         var exeDir = AppContext.BaseDirectory;
@@ -41,7 +54,7 @@ internal static class VulkanHelper
         foreach (var dir in candidates)
         {
             var path = Path.Combine(dir, "ggml-vulkan-whisper.dll");
-            if (File.Exists(path))
+            if (FileExistsWithRetry(path))
                 return dir;
         }
 
@@ -76,5 +89,25 @@ internal static class VulkanHelper
         }
 
         AppLogger.Info("Vulkan ランタイムセットアップ完了");
+    }
+
+    /// <summary>
+    /// File.Exists をリトライ付きで実行する。
+    /// </summary>
+    private static bool FileExistsWithRetry(string path)
+    {
+        for (int i = 0; i < MaxRetries; i++)
+        {
+            try
+            {
+                if (File.Exists(path))
+                    return true;
+            }
+            catch { }
+
+            if (i < MaxRetries - 1)
+                Thread.Sleep(RetryDelayMs);
+        }
+        return false;
     }
 }
