@@ -15,6 +15,14 @@ namespace TalkTranscript.Transcribers;
 /// </summary>
 internal static class WhisperTextFilter
 {
+    // ── 先頭の話者ラベルを除去する正規表現 ──
+    // Whisper は「(話し手)」「(小野田)」「（司会者）」のような話者ラベルを
+    // テキスト先頭に挿入するハルシネーションを起こすことがある。
+    // 半角・全角カッコの両方に対応し、中身は1〜10文字に制限。
+    private static readonly Regex SpeakerLabelPrefixPattern = new(
+        @"^[\(（]\s*[^\)）]{1,10}\s*[\)）]\s*[：:\s]*",
+        RegexOptions.Compiled);
+
     // ── 日本語文字間の不要なスペースを除去する正規表現 ──
     // Whisper は日本語の形態素間にスペースを挿入する傾向がある。
     // ひらがな・カタカナ・漢字・CJK句読点の間のスペースを除去する。
@@ -142,6 +150,9 @@ internal static class WhisperTextFilter
             return "";
 
         string result = text.Trim();
+
+        // 先頭の話者ラベルを除去 (例: "(話し手)こんにちは" → "こんにちは")
+        result = SpeakerLabelPrefixPattern.Replace(result, "");
 
         // 全角スペースを半角に
         result = result.Replace('　', ' ');

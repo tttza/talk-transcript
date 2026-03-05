@@ -135,6 +135,27 @@ public class WhisperTextFilterTests
         Assert.Equal("これは test です", WhisperTextFilter.NormalizeText("これは test です"));
     }
 
+    // ── NormalizeText: 話者ラベル除去 ──
+
+    [Theory]
+    [InlineData("(話し手)こんにちは", "こんにちは")]
+    [InlineData("(小野田)今日の議題は", "今日の議題は")]
+    [InlineData("（司会者）それでは始めます", "それでは始めます")]
+    [InlineData("(Speaker)Hello", "Hello")]
+    [InlineData("(話し手) こんにちは", "こんにちは")]
+    [InlineData("(田中)：よろしくお願いします", "よろしくお願いします")]
+    public void NormalizeText_RemovesSpeakerLabelPrefix(string input, string expected)
+    {
+        Assert.Equal(expected, WhisperTextFilter.NormalizeText(input));
+    }
+
+    [Fact]
+    public void NormalizeText_KeepsLegitimateParentheses()
+    {
+        // 先頭ではない括弧は保持される
+        Assert.Equal("これは(重要)です", WhisperTextFilter.NormalizeText("これは(重要)です"));
+    }
+
     // ── TrimOverlappingPrefix ──
 
     [Fact]
